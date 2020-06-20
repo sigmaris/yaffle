@@ -1,0 +1,19 @@
+[package]
+name = "rustylog"
+version = "0.1.0"
+authors = ["Hugh Cole-Baker <sigmaris@gmail.com>"]
+edition = "2018"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[dependencies.tokio]
+version = "^0.2"
+features = ["macros", "rt-threaded"]
+
+[dependencies.hyper]
+version = "^0.13"
+features = ["stream"]
+
+[dependencies.toshi]
+git = "https://github.com/toshi-search/Toshi"
+default-features = false
+features = ["hyper_client"]
