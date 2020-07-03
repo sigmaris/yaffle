@@ -4,16 +4,19 @@ version = "0.1.0"
 authors = ["Hugh Cole-Baker <sigmaris@gmail.com>"]
 edition = "2018"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-[dependencies.tokio]
-version = "^0.2"
-features = ["macros", "rt-threaded"]
-
-[dependencies.hyper]
-version = "^0.13"
-features = ["stream"]
-
-[dependencies.toshi]
-git = "https://github.com/toshi-search/Toshi"
-default-features = false
-features = ["hyper_client"]
+[dependencies]
+bytes = "0.5"
+chrono = "0.4"
+env_logger = "0.7"
+flate2 = "1.0"
+horrorshow = "0.8"
+hyper = { version = "0.13", features = ["stream"] }
+lazy_static = "1.4"
+listenfd = "0.3"
+log = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tantivy = "0.12"
+tokio = { version = "0.2", features = ["macros", "rt-threaded", "udp", "dns", "sync"] }
+toshi = { path = "../Toshi/toshi-client", default-features = false, features = ["hyper_client"] }
+warp = "0.2"
