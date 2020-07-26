@@ -1,11 +1,16 @@
 use std::collections::HashMap;
 use std::error::Error;
+use std::sync::{Arc, Mutex};
 
+use chrono::{DateTime, NaiveDateTime, Utc};
+use futures::stream::{FuturesOrdered, StreamExt};
 use lazy_static::lazy_static;
 use listenfd::ListenFd;
 use log::{debug, warn};
-use serde_json::{Number, Value};
-use tantivy::schema::{Schema, SchemaBuilder, INDEXED, STORED, STRING, TEXT};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use tantivy::schema::{Schema, SchemaBuilder, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy::space_usage::SearcherSpaceUsage;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -14,10 +19,26 @@ use toshi::{Client, HyperToshi, IndexOptions};
 mod gelf;
 mod websrv;
 type JsonMap<'a> = HashMap<&'a str, Value>;
+type JsonOwnedKeysMap = HashMap<String, Value>;
+type DefaultHyperToshi =
+    HyperToshi<hyper::client::HttpConnector<hyper::client::connect::dns::GaiResolver>>;
+
+pub struct Settings {
+    pub toshi_url: String,
+    pub index_name: String,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
     env_logger::init();
     let mut rt = tokio::runtime::Runtime::new().unwrap();
+
+    let toshi_url = "http://localhost:8080".to_string();
+    let index_name = rt.block_on(find_index(&toshi_url, 10_000_000))?;
+    debug!("Found index name {}", index_name);
+    let settings = Arc::new(Mutex::new(Settings {
+        toshi_url,
+        index_name,
+    }));
 
     let mut listenfd = ListenFd::from_env();
     let (gelf_tx, gelf_rx) = mpsc::channel(10);
@@ -43,50 +64,148 @@ fn main() -> Result<(), Box<dyn Error>> {
         },
     ));
 
-    rt.spawn(websrv::run_http_server(http_listener, shutdown_rx));
-    rt.block_on(async { async_main(gelf_rx).await.unwrap() });
+    rt.spawn(websrv::run_http_server(
+        settings.clone(),
+        http_listener,
+        shutdown_rx,
+    ));
+    rt.block_on(async { async_main(settings, gelf_rx).await.unwrap() });
     shutdown_tx.send(()).ok();
 
     Ok(())
+}
+
+fn make_index_name(index: u32) -> String {
+    format!("yaffle_{}", index)
+}
+
+/// A response gotten from the _summary route for an index
+#[derive(Debug, Serialize, Deserialize)]
+struct SummaryResponse {
+    summaries: JsonOwnedKeysMap,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    segment_sizes: Option<SearcherSpaceUsage>,
+}
+
+fn index_is_open(summary: &SummaryResponse, max_docs: u32) -> bool {
+    summary
+        .segment_sizes
+        .as_ref()
+        .map(|sizes| {
+            sizes
+                .segments()
+                .iter()
+                .fold(0, |acc, segment| acc + segment.num_docs())
+                < max_docs
+        })
+        .unwrap_or(false)
+}
+
+async fn check_index(
+    c: &DefaultHyperToshi,
+    index: u32,
+    max_docs: u32,
+) -> Result<(bool, bool, u32), Box<dyn Error>> {
+    let index_name = make_index_name(index);
+    let body = hyper::body::to_bytes(c.index_summary(&index_name, true).await?.into_body()).await?;
+    serde_json::from_slice(&body)
+        .map(|summary: SummaryResponse| {
+            let is_open = index_is_open(&summary, max_docs);
+            debug!(
+                "Index {} {} open",
+                index_name,
+                if is_open { "is" } else { "is not" }
+            );
+            Ok((true, is_open, index))
+        })
+        .unwrap_or(Ok((false, false, index)))
+}
+
+async fn find_first_open_index(
+    c: &DefaultHyperToshi,
+    start: u32,
+    max_docs: u32,
+) -> Result<String, Box<dyn Error>> {
+    let mut index = start;
+    while let (exists, false, _) = check_index(c, index, max_docs).await? {
+        if exists {
+            debug!("Does yaffle_{} exist? YES", index);
+            index += 1;
+        } else {
+            debug!("Does yaffle_{} exist? NO", index);
+            c.create_index(make_index_name(index), TANTIVY_SCHEMA.clone())
+                .await?;
+            // We now have a new, open index to use
+            break;
+        }
+    }
+    Ok(make_index_name(index))
+}
+
+async fn find_index(toshi_url: &str, max_docs: u32) -> Result<String, Box<dyn Error>> {
+    let client = hyper::Client::default();
+    let c = HyperToshi::with_client(toshi_url, client);
+    // TODO: avoid iterating when Toshi has a "list all indexes" method
+    let mut futures = FuturesOrdered::new();
+    for coarse in (0..20).rev() {
+        debug!("Pushing check for yaffle_{}", coarse * 10);
+        futures.push(check_index(&c, coarse * 10, max_docs));
+    }
+    'outer: for fine in 1..200 {
+        for coarse in (0..20).rev() {
+            if let Some(result) = futures.next().await {
+                let (exists, _, index) = result?;
+                if exists {
+                    debug!("Does yaffle_{} exist? YES", index);
+                    return Ok(find_first_open_index(&c, index, max_docs).await?);
+                } else {
+                    debug!("Does yaffle_{} exist? NO", index);
+                }
+            } else {
+                // futures stream is empty, break
+                break 'outer;
+            }
+            if fine < 10 {
+                debug!("Pushing check for yaffle_{}", (coarse * 10) + fine);
+                futures.push(check_index(&c, (coarse * 10) + fine, max_docs));
+            }
+        }
+    }
+    debug!("No yaffle_* indexes at all found, creating new index yaffle_0...");
+    c.create_index("yaffle_0", TANTIVY_SCHEMA.clone()).await?;
+    Ok("yaffle_0".to_string())
 }
 
 pub fn get_our_schema_map() -> &'static HashMap<&'static str, &'static OurSchema<'static>> {
     &OUR_SCHEMA_MAP
 }
 
-async fn async_main(mut gelf_rx: mpsc::Receiver<gelf::GELFMessage>) -> Result<(), Box<dyn Error>> {
+pub fn get_tantivy_schema() -> &'static Schema {
+    &TANTIVY_SCHEMA
+}
+
+async fn async_main(
+    settings: Arc<Mutex<Settings>>,
+    mut gelf_rx: mpsc::Receiver<gelf::GELFMessage>,
+) -> Result<(), Box<dyn Error>> {
     // Check index exists
     // TODO: check schema?
     let client = hyper::Client::default();
-    let c = HyperToshi::with_client("http://localhost:8080", client);
-    let body =
-        hyper::body::to_bytes(c.index_summary("rustylog_0", false).await?.into_body()).await?;
-
-    // Hack since Toshi returns 200 on nonexistent index
-    let summary: JsonMap = serde_json::from_slice(&body)?;
-    if summary.contains_key("summaries") {
-        debug!("Index already exists");
-    } else if summary.contains_key("message") {
-        debug!(
-            "Index doesn't exist ({:?}), creating new index...",
-            summary.get("message")
-        );
-        c.create_index("rustylog_0", TANTIVY_SCHEMA.clone()).await?;
-    } else {
-        return Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Unexpected response from index_summary: {:?}", summary),
-        )));
-    }
+    let c = { HyperToshi::with_client(&settings.lock().unwrap().toshi_url, client) };
 
     while let Some(msg) = gelf_rx.recv().await {
         let doc = extract_gelf_fields(&OUR_SCHEMA, &msg);
         if doc.len() > 0 {
-            if let Err(e) = c
-                .add_document("rustylog_0", Some(IndexOptions { commit: true }), doc)
+            match c
+                .add_document(
+                    &settings.lock().unwrap().index_name,
+                    Some(IndexOptions { commit: true }),
+                    doc,
+                )
                 .await
             {
-                warn!("Failed to insert document: {}", e);
+                Ok(_response) => { /* TODO: check status */ }
+                Err(e) => warn!("Failed to insert document: {}", e),
             }
         } else {
             warn!("Empty document extracted from {:?}", msg);
@@ -108,7 +227,10 @@ fn extract_gelf_fields<'a>(schema: &[OurSchema<'a>], msg: &'a gelf::GELFMessage)
                 break;
             } else {
                 let field_name = match gelf_field {
-                    Convert::None(f) | Convert::USecToFloatSec(f) => f,
+                    Convert::None(f)
+                    | Convert::FloatSecToUsec(f)
+                    | Convert::SyslogTimestamp(f)
+                    | Convert::HexToUint(f) => f,
                 };
                 if let Some(msg_val) = msg.other.get(*field_name) {
                     // Convert type to Tantivy type
@@ -140,44 +262,72 @@ fn convert(
         (FieldType::String, anything) | (FieldType::Text, anything) => {
             Ok(Value::String(anything.to_string()))
         }
-        (FieldType::U64, Value::String(s)) => Ok(Value::Number(s.parse::<u64>()?.into())),
+        (FieldType::U64, Value::String(s)) => Ok(Value::Number(
+            if let Convert::HexToUint(_) = input_conversion {
+                u64::from_str_radix(s, 16)?.into()
+            } else {
+                s.parse::<u64>()?.into()
+            },
+        )),
         (FieldType::U64, Value::Number(n)) if n.is_u64() => Ok(input.clone()),
         (FieldType::U64, other) => Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Can't represent {} as u64", other),
         ))),
-        (FieldType::I64, Value::String(s)) => Ok(Value::Number(s.parse::<i64>()?.into())),
+        (FieldType::I64, Value::String(s)) => Ok(Value::Number(
+            if let Convert::HexToUint(_) = input_conversion {
+                i64::from_str_radix(s, 16)?.into()
+            } else {
+                s.parse::<i64>()?.into()
+            },
+        )),
         (FieldType::I64, Value::Number(n)) if n.is_i64() => Ok(input.clone()),
         (FieldType::I64, other) => Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("Can't represent {} as i64", other),
         ))),
-        (FieldType::Timestamp, Value::String(s)) => {
-            let mut v: f64 = s.parse()?;
-            if let Convert::USecToFloatSec(_) = input_conversion {
-                v /= 1000000f64;
+        (FieldType::Timestamp, Value::String(s)) => match input_conversion {
+            Convert::None(_) => Ok(s.parse::<u64>()?.into()),
+            Convert::HexToUint(_) => Ok(u64::from_str_radix(s, 16)?.into()),
+            Convert::FloatSecToUsec(_) => {
+                let v: f64 = s.parse()?;
+                Ok(((v * 1_000_000f64) as u64).into())
             }
-            Ok(Number::from_f64(v)
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Can't put {} into JSON Number", v),
-                ))
-                .map(|n| Value::Number(n))?)
-        }
+            Convert::SyslogTimestamp(_) => Ok(DateTime::parse_from_rfc3339(s)
+                .map(|dt| dt.timestamp_nanos() / 1000)
+                .or_else(|_e| DateTime::parse_from_rfc2822(s).map(|dt| dt.timestamp_nanos() / 1000))
+                .or_else(|_e| {
+                    let now_s = format!("{} {}", Utc::now().format("%Y"), s);
+                    NaiveDateTime::parse_from_str(&now_s, "%Y %b %e %T")
+                        .map(|naive| naive.timestamp_nanos() / 1000)
+                })?
+                .into()),
+        },
         (FieldType::Timestamp, Value::Number(n)) => match input_conversion {
-            Convert::None(_) => Ok(input.clone()),
-            Convert::USecToFloatSec(_) => {
-                let n_sec = n.as_f64().ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Can't represent {} as f64", n),
-                ))? / 1000000f64;
-                Ok(Number::from_f64(n_sec)
+            Convert::None(_) => Ok(Value::Number(
+                input
+                    .as_u64()
                     .ok_or(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
-                        format!("Can't put {} into JSON Number", n_sec),
-                    ))
-                    .map(|n| Value::Number(n))?)
+                        format!("Can't represent {} as u64", input),
+                    ))?
+                    .into(),
+            )),
+            Convert::FloatSecToUsec(_) => {
+                let n_usec = n.as_f64().ok_or(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("Can't represent {} as f64", n),
+                ))? * 1_000_000f64;
+                Ok(Value::Number((n_usec as u64).into()))
             }
+            Convert::SyslogTimestamp(_) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Can't convert {} as syslog timestamp", n),
+            ))),
+            Convert::HexToUint(_) => Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Can't convert {} as hex", n),
+            ))),
         },
         (FieldType::Timestamp, other) => Err(Box::new(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
@@ -188,7 +338,9 @@ fn convert(
 
 #[derive(Debug, Eq, PartialEq)]
 enum Convert<'a> {
-    USecToFloatSec(&'a str),
+    FloatSecToUsec(&'a str),
+    SyslogTimestamp(&'a str),
+    HexToUint(&'a str),
     None(&'a str),
 }
 
@@ -252,7 +404,7 @@ lazy_static! {
         },
         OurSchema {
             name: "errno",
-            kind: FieldType::U64,
+            kind: FieldType::I64,
             from_gelf: &[Convert::None("_ERRNO")],
         },
         OurSchema {
@@ -283,175 +435,175 @@ lazy_static! {
         OurSchema {
             name: "syslog_timestamp",
             kind: FieldType::Timestamp,
-            from_gelf: &[Convert::None("_SYSLOG_TIMESTAMP")],
+            from_gelf: &[Convert::SyslogTimestamp("_SYSLOG_TIMESTAMP")],
         },
         OurSchema {
             name: "pid",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__PID")],
+            from_gelf: &[Convert::None("_PID")],
         },
         OurSchema {
             name: "uid",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__UID")],
+            from_gelf: &[Convert::None("_UID")],
         },
         OurSchema {
             name: "gid",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__GID")],
+            from_gelf: &[Convert::None("_GID")],
         },
         OurSchema {
             name: "comm",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__COMM")],
+            from_gelf: &[Convert::None("_COMM")],
         },
         OurSchema {
             name: "exe",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__EXE")],
+            from_gelf: &[Convert::None("_EXE")],
         },
         OurSchema {
             name: "cmdline",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__CMDLINE")],
+            from_gelf: &[Convert::None("_CMDLINE")],
         },
         OurSchema {
             name: "cap_effective",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__CAP_EFFECTIVE")],
+            from_gelf: &[Convert::HexToUint("_CAP_EFFECTIVE")],
         },
         OurSchema {
             name: "audit_session",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__AUDIT_SESSION")],
+            from_gelf: &[Convert::None("_AUDIT_SESSION")],
         },
         OurSchema {
             name: "audit_loginuid",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__AUDIT_LOGINUID")],
+            from_gelf: &[Convert::None("_AUDIT_LOGINUID")],
         },
         OurSchema {
             name: "systemd_cgroup",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__SYSTEMD_CGROUP")],
+            from_gelf: &[Convert::None("_SYSTEMD_CGROUP")],
         },
         OurSchema {
             name: "systemd_slice",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__SYSTEMD_SLICE")],
+            from_gelf: &[Convert::None("_SYSTEMD_SLICE")],
         },
         OurSchema {
             name: "systemd_unit",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__SYSTEMD_UNIT")],
+            from_gelf: &[Convert::None("_SYSTEMD_UNIT")],
         },
         OurSchema {
             name: "systemd_user_unit",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__SYSTEMD_USER_UNIT")],
+            from_gelf: &[Convert::None("_SYSTEMD_USER_UNIT")],
         },
         OurSchema {
             name: "systemd_user_slice",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__SYSTEMD_USER_SLICE")],
+            from_gelf: &[Convert::None("_SYSTEMD_USER_SLICE")],
         },
         OurSchema {
             name: "systemd_session",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__SYSTEMD_SESSION")],
+            from_gelf: &[Convert::None("_SYSTEMD_SESSION")],
         },
         OurSchema {
             name: "systemd_owner_uid",
             kind: FieldType::U64,
-            from_gelf: &[Convert::None("__SYSTEMD_OWNER_UID")],
+            from_gelf: &[Convert::None("_SYSTEMD_OWNER_UID")],
         },
         OurSchema {
             name: "selinux_context",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__SELINUX_CONTEXT")],
+            from_gelf: &[Convert::None("_SELINUX_CONTEXT")],
         },
         OurSchema {
             name: "source_timestamp",
             kind: FieldType::Timestamp,
             from_gelf: &[
-                Convert::None("timestamp"),
-                Convert::USecToFloatSec("_SOURCE_REALTIME_TIMESTAMP")
+                Convert::FloatSecToUsec("timestamp"),
+                Convert::None("_SOURCE_REALTIME_TIMESTAMP")
             ],
         },
         OurSchema {
             name: "boot_id",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__BOOT_ID")],
+            from_gelf: &[Convert::None("_BOOT_ID")],
         },
         OurSchema {
             name: "machine_id",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__MACHINE_ID")],
+            from_gelf: &[Convert::None("_MACHINE_ID")],
         },
         OurSchema {
             name: "systemd_invocation_id",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__SYSTEMD_INVOCATION_ID")],
+            from_gelf: &[Convert::None("_SYSTEMD_INVOCATION_ID")],
         },
         OurSchema {
             name: "hostname",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("host"), Convert::None("__HOSTNAME")],
+            from_gelf: &[Convert::None("host"), Convert::None("_HOSTNAME")],
         },
         OurSchema {
             name: "transport",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__TRANSPORT")],
+            from_gelf: &[Convert::None("_TRANSPORT")],
         },
         OurSchema {
             name: "stream_id",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__STREAM_ID")],
+            from_gelf: &[Convert::None("_STREAM_ID")],
         },
         OurSchema {
             name: "line_break",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__LINE_BREAK")],
+            from_gelf: &[Convert::None("_LINE_BREAK")],
         },
         OurSchema {
             name: "namespace",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__NAMESPACE")],
+            from_gelf: &[Convert::None("_NAMESPACE")],
         },
         OurSchema {
             name: "kernel_device",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__KERNEL_DEVICE")],
+            from_gelf: &[Convert::None("_KERNEL_DEVICE")],
         },
         OurSchema {
             name: "kernel_subsystem",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("__KERNEL_SUBSYSTEM")],
+            from_gelf: &[Convert::None("_KERNEL_SUBSYSTEM")],
         },
         OurSchema {
             name: "udev_sysname",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__UDEV_SYSNAME")],
+            from_gelf: &[Convert::None("_UDEV_SYSNAME")],
         },
         OurSchema {
             name: "udev_devnode",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__UDEV_DEVNODE")],
+            from_gelf: &[Convert::None("_UDEV_DEVNODE")],
         },
         OurSchema {
             name: "udev_devlink",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__UDEV_DEVLINK")],
+            from_gelf: &[Convert::None("_UDEV_DEVLINK")],
         },
         OurSchema {
             name: "coredump_unit",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__COREDUMP_UNIT")],
+            from_gelf: &[Convert::None("_COREDUMP_UNIT")],
         },
         OurSchema {
             name: "coredump_user_unit",
             kind: FieldType::Text,
-            from_gelf: &[Convert::None("__COREDUMP_USER_UNIT")],
+            from_gelf: &[Convert::None("_COREDUMP_USER_UNIT")],
         },
         OurSchema {
             name: "object_pid",
@@ -521,12 +673,12 @@ lazy_static! {
         OurSchema {
             name: "recv_rt_timestamp",
             kind: FieldType::Timestamp,
-            from_gelf: &[Convert::USecToFloatSec("___REALTIME_TIMESTAMP")],
+            from_gelf: &[Convert::None("___REALTIME_TIMESTAMP")],
         },
         OurSchema {
             name: "recv_mt_timestamp",
             kind: FieldType::Timestamp,
-            from_gelf: &[Convert::USecToFloatSec("___MONOTONIC_TIMESTAMP")],
+            from_gelf: &[Convert::None("___MONOTONIC_TIMESTAMP")],
         },
     ];
     static ref TANTIVY_SCHEMA: Schema = {
@@ -537,7 +689,9 @@ lazy_static! {
                 FieldType::Text => schema_builder.add_text_field(field.name, STORED | TEXT),
                 FieldType::U64 => schema_builder.add_u64_field(field.name, STORED | INDEXED),
                 FieldType::I64 => schema_builder.add_i64_field(field.name, STORED | INDEXED),
-                FieldType::Timestamp => schema_builder.add_f64_field(field.name, INDEXED | STORED),
+                FieldType::Timestamp => {
+                    schema_builder.add_u64_field(field.name, INDEXED | STORED | FAST)
+                }
             };
         }
         schema_builder.build()

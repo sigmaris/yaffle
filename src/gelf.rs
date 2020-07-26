@@ -91,7 +91,7 @@ fn assemble_chunked(
     });
     if let Some(opt) = entry.get_mut(seqno as usize) {
         if let Some(old) = opt.replace(content.to_bytes()) {
-            debug!("Replaced packet {:?}!", old)
+            warn!("Replaced packet {:?}!", old)
         }
     } else {
         warn!(

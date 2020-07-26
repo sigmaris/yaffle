@@ -1615,27 +1615,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rustylog"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "chrono",
- "env_logger",
- "flate2",
- "horrorshow",
- "hyper",
- "lazy_static",
- "listenfd",
- "log 0.4.8",
- "serde",
- "serde_json",
- "tantivy",
- "tokio",
- "toshi",
- "warp",
-]
-
-[[package]]
 name = "ryu"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2551,4 +2530,26 @@ checksum = "d59cefebd0c892fa2dd6de581e937301d8552cb44489cdff035c6187cb63fa5e"
 dependencies = [
  "winapi 0.2.8",
  "winapi-build",
+]
+
+[[package]]
+name = "yaffle"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "chrono",
+ "env_logger",
+ "flate2",
+ "futures",
+ "horrorshow",
+ "hyper",
+ "lazy_static",
+ "listenfd",
+ "log 0.4.8",
+ "serde",
+ "serde_json",
+ "tantivy",
+ "tokio",
+ "toshi",
+ "warp",
 ]
