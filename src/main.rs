@@ -4,7 +4,6 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, NaiveDateTime, Utc};
-use futures::future::join_all;
 use futures::stream::{FuturesOrdered, StreamExt};
 use lazy_static::lazy_static;
 use listenfd::ListenFd;
@@ -16,7 +15,6 @@ use tantivy::space_usage::SearcherSpaceUsage;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::delay_for;
 use toshi::{Client, HyperToshi, IndexOptions};
 
 mod gelf;
@@ -44,7 +42,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     }));
 
     let mut listenfd = ListenFd::from_env();
-    let (gelf_tx, gelf_rx) = mpsc::channel(BATCH_SIZE * 4);
+    let (gelf_tx, gelf_rx) = mpsc::channel(10);
     let gelf_sock = if let Some(std_sock) = listenfd.take_udp_socket(0).ok().flatten() {
         debug!("Using passed GELF UDP socket {:?}", std_sock);
         rt.block_on(async { UdpSocket::from_std(std_sock) })?
@@ -124,6 +122,10 @@ async fn check_index(
         .unwrap_or(Ok((false, false, index)))
 }
 
+// async fn index_manager(
+//     settings: Arc<Mutex<Settings>>,
+// ) {}
+
 async fn find_first_open_index(
     c: &DefaultHyperToshi,
     start: u32,
@@ -187,8 +189,7 @@ pub fn get_tantivy_schema() -> &'static Schema {
     &TANTIVY_SCHEMA
 }
 
-const BATCH_SIZE: usize = 10;
-const SLEEP_SECS: u32 = 10;
+const COMMIT_EVERY_SECS: u32 = 10;
 
 async fn async_main(
     settings: Arc<Mutex<Settings>>,
@@ -196,49 +197,31 @@ async fn async_main(
 ) -> Result<(), Box<dyn Error>> {
     let client = hyper::Client::default();
     let c = { HyperToshi::with_client(&settings.lock().unwrap().toshi_url, client) };
-    let mut sleep_time = Duration::from_secs(SLEEP_SECS.into());
+    let mut last_commit = Instant::now();
+    let commit_every = Duration::from_secs(COMMIT_EVERY_SECS.into());
 
-    'outer: loop {
-        // Attempt to do batching with rate control
-        delay_for(sleep_time).await;
-        let mut batch = Vec::with_capacity(BATCH_SIZE);
-        let index_name = &settings.lock().unwrap().index_name;
-        'inner: while batch.len() < (BATCH_SIZE * 2) {
-            match gelf_rx.try_recv() {
-                Ok(msg) => batch.push(msg),
-                Err(mpsc::error::TryRecvError::Empty) => break 'inner,
-                Err(mpsc::error::TryRecvError::Closed) => break 'outer,
-            }
-        }
-        let results = join_all(batch.iter().filter_map(|msg| {
-            let doc = extract_gelf_fields(&OUR_SCHEMA, msg);
-            if doc.len() > 0 {
-                Some(c.add_document(index_name, Some(IndexOptions { commit: false }), doc))
+    while let Some(msg) = gelf_rx.recv().await {
+        let doc = extract_gelf_fields(&OUR_SCHEMA, &msg);
+        if doc.len() > 0 {
+            let commit = if last_commit.elapsed() >= commit_every {
+                last_commit = Instant::now();
+                true
             } else {
-                warn!("Empty document extracted from {:?}", msg);
-                None
+                false
+            };
+            match c
+                .add_document(
+                    &settings.lock().unwrap().index_name,
+                    Some(IndexOptions { commit }),
+                    doc,
+                )
+                .await
+            {
+                Ok(_response) => { /* TODO: check status */ }
+                Err(e) => warn!("Failed to insert document: {}", e),
             }
-        }))
-        .await;
-        debug!("Batch sent {} messages", batch.len());
-        let target_docs_rate = BATCH_SIZE as f64 / SLEEP_SECS as f64;
-        let docs_rate = results.len() as f64 / sleep_time.as_secs_f64();
-        if docs_rate > target_docs_rate {
-            // Reduce sleep time
-            sleep_time = Duration::from_secs_f64(0.001f64.max(sleep_time.as_secs_f64() / 1.5f64));
-            debug!(
-                "Docs rate {}, target rate {}, decreased sleep_time to {:?}",
-                docs_rate, target_docs_rate, sleep_time
-            );
         } else {
-            // Increase sleep time
-            sleep_time = Duration::from_secs_f64(
-                ((SLEEP_SECS * 2) as f64).min(sleep_time.as_secs_f64() * 1.5f64),
-            );
-            debug!(
-                "Docs rate {}, target rate {}, increased sleep_time to {:?}",
-                docs_rate, target_docs_rate, sleep_time
-            );
+            warn!("Empty document extracted from {:?}", msg);
         }
     }
 
