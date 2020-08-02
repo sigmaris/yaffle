@@ -25,6 +25,7 @@ use tokio::time::delay_for;
 use toshi::{Client, HyperToshi, IndexOptions};
 
 mod gelf;
+mod query;
 mod syslog;
 mod websrv;
 

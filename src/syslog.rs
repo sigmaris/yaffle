@@ -11,21 +11,21 @@ use nom::bytes::complete::{tag, take_until, take_while1, take_while_m_n};
 use nom::character::complete::{char, digit1};
 use nom::character::{is_alphanumeric, is_digit, is_space};
 use nom::combinator::{map, map_res, opt, recognize, rest, value};
-use nom::sequence::{preceded, separated_pair, terminated, tuple};
+use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
 pub struct SyslogMessage {
-    pub priority: u8,
-    pub facility: String,
-    pub source_timestamp: DateTime<FixedOffset>,
-    pub hostname: Option<String>,
-    pub identifier: Option<String>,
-    pub pid: Option<u32>,
-    pub message: String,
-    pub full_message: String,
+    pub(crate) priority: u8,
+    pub(crate) facility: String,
+    pub(crate) source_timestamp: DateTime<FixedOffset>,
+    pub(crate) hostname: Option<String>,
+    pub(crate) identifier: Option<String>,
+    pub(crate) pid: Option<u32>,
+    pub(crate) message: String,
+    pub(crate) full_message: String,
 }
 
 const FACILITY_NAMES: [&'static str; 16] = [
@@ -47,10 +47,7 @@ const FACILITY_NAMES: [&'static str; 16] = [
 fn prio_and_facility(input: &[u8]) -> IResult<&[u8], (u8, String)> {
     map(
         map_res(
-            map_res(
-                preceded(char('<'), terminated(digit1, char('>'))),
-                std::str::from_utf8,
-            ),
+            map_res(delimited(char('<'), digit1, char('>')), std::str::from_utf8),
             |digits| u8::from_str_radix(digits, 10),
         ),
         |combined| {
@@ -198,10 +195,14 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
             message: {
                 let string_msg = String::from_utf8_lossy(msg);
                 if opt_ts.is_none() && opt_hostname.is_none() && opt_ident_and_pid.is_none() {
-                    string_msg.strip_prefix(' ').unwrap_or(&string_msg).to_string()
+                    string_msg
+                        .strip_prefix(' ')
+                        .unwrap_or(&string_msg)
+                        .to_string()
                 } else {
                     string_msg.to_string()
-                }},
+                }
+            },
             full_message: String::from_utf8_lossy(input).to_string(),
         },
     )(input)
@@ -271,7 +272,10 @@ fn test_full_msg_with_timestamp() {
     assert_eq!(msg.source_timestamp.second(), 0);
     assert_eq!(msg.identifier, Some("crond".to_string()));
     assert_eq!(msg.pid, Some(926));
-    assert_eq!(msg.message, "USER root pid 14786 cmd logger -p syslog.info -- -- MARK --".to_string())
+    assert_eq!(
+        msg.message,
+        "USER root pid 14786 cmd logger -p syslog.info -- -- MARK --".to_string()
+    )
 }
 
 #[test]
@@ -308,7 +312,10 @@ fn test_full_msg_no_timestamp() {
     assert_eq!(msg.hostname, None);
     assert_eq!(msg.identifier, None);
     assert_eq!(msg.pid, None);
-    assert_eq!(msg.message, "[0]DAA FXO: ON-HOOK, PARA HANDSET: OFF-HOOK".to_string())
+    assert_eq!(
+        msg.message,
+        "[0]DAA FXO: ON-HOOK, PARA HANDSET: OFF-HOOK".to_string()
+    )
 }
 
 #[test]
@@ -326,5 +333,4 @@ fn test_bare_message() {
     assert_eq!(msg.identifier, None);
     assert_eq!(msg.pid, None);
     assert_eq!(msg.message, "register callback".to_string())
-
 }
