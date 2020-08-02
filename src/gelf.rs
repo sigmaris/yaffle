@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error;
 use std::io;
+use std::net::SocketAddr;
 
 use bytes::{buf::ext::BufExt, Buf, Bytes};
 use flate2::bufread::{GzDecoder, ZlibDecoder};
@@ -178,7 +179,7 @@ fn parse_packet(
 
 pub async fn run_recv_loop(
     mut socket: UdpSocket,
-    mut gelf_pipe: Sender<GELFMessage>,
+    mut gelf_pipe: Sender<(SocketAddr, GELFMessage)>,
 ) -> Result<(), Box<dyn Error>> {
     let mut buf = [0; 65536];
     let mut partials: HashMap<u64, Vec<Option<Bytes>>> = HashMap::new();
@@ -187,11 +188,11 @@ pub async fn run_recv_loop(
         tokio::select! {
             something = socket.recv_from(&mut buf) => {
                 match something {
-                    Ok((size, _)) => {
+                    Ok((size, src)) => {
                         debug!("Read {} bytes from socket", size);
                         let parsed = parse_packet(&mut partials, &mut buf.take(size), &expiry_tx).unwrap_or_else(|e| {warn!("Packet handle error: {}", e); None});
                         if let Some(gelf_msg) = parsed {
-                            gelf_pipe.send(gelf_msg).await?
+                            gelf_pipe.send((src, gelf_msg)).await?
                         }
                     }
                     Err(e) => {

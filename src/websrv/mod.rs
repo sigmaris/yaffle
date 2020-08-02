@@ -1,6 +1,5 @@
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use chrono::{TimeZone, Utc};
@@ -15,7 +14,7 @@ use tokio::sync::oneshot;
 use toshi::{BoolQuery, Client, ExactTerm, HyperToshi, Query, RangeQuery, Search, SearchResults};
 use warp::{reply, Filter};
 
-use crate::{get_our_schema_map, FieldType, Settings};
+use crate::{get_our_schema_map, FieldType, SharedSettings};
 
 lazy_static! {
     static ref DEFAULT_FIELDS: HashSet<&'static str> = {
@@ -100,18 +99,16 @@ fn doc_list_content<'a>(
                                 fieldset(class="form-group") {
                                     legend { :"Fields" }
                                     @for field in fields {
-                                        @if field != &"source_timestamp" {
-                                            div(class="form-check") {
-                                                input(
-                                                    class="form-check-input log-field-toggle",
-                                                    type="checkbox",
-                                                    value=field,
-                                                    data-target=format!("{}_col", field),
-                                                    id=format!("{}_check", field),
-                                                    checked?=DEFAULT_FIELDS.contains(field)
-                                                );
-                                                label(class="form-check-label", for=format!("{}_check", field)) { :field }
-                                            }
+                                        div(class="form-check") {
+                                            input(
+                                                class="form-check-input log-field-toggle",
+                                                type="checkbox",
+                                                value=field,
+                                                data-target=format!("{}_col", field),
+                                                id=format!("{}_check", field),
+                                                checked?=DEFAULT_FIELDS.contains(field)
+                                            );
+                                            label(class="form-check-label", for=format!("{}_check", field)) { :field }
                                         }
                                     }
                                 }
@@ -245,7 +242,7 @@ struct SearchParams {
 }
 
 fn search_route(
-    settings: Arc<Mutex<Settings>>,
+    settings: SharedSettings,
 ) -> impl warp::Filter<Extract = (String,), Error = warp::reject::Rejection> + Clone {
     warp::path("search")
         .and(warp::path::end())
@@ -255,7 +252,7 @@ fn search_route(
                 &settings.lock().unwrap().toshi_url,
                 hyper::Client::default(),
             );
-            let index_name = settings.lock().unwrap().index_name.clone();
+            let index_name = settings.lock().unwrap().index_name();
             let query = if sp.q != "" {
                 Query::Exact(ExactTerm::with_term("message", &sp.q))
             } else {
@@ -318,7 +315,7 @@ fn fieldset(results: &SearchResults<HashMap<String, Value>>) -> Vec<&str> {
 }
 
 pub async fn run_http_server(
-    settings: Arc<Mutex<Settings>>,
+    settings: SharedSettings,
     http_listener: &'static mut TcpListener,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
