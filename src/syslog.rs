@@ -164,7 +164,7 @@ fn identifier_and_pid(input: &[u8]) -> IResult<&[u8], (&[u8], Option<u32>)> {
                 |s| u32::from_str_radix(s, 10),
             )),
         )),
-        tag(":"),
+        tag(": "),
     )(input)
 }
 
@@ -195,7 +195,13 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
             identifier: opt_ident_and_pid
                 .map(|(ident, _)| String::from_utf8_lossy(ident).to_string()),
             pid: opt_ident_and_pid.map(|(_, pid)| pid).flatten(),
-            message: String::from_utf8_lossy(msg).to_string(),
+            message: {
+                let string_msg = String::from_utf8_lossy(msg);
+                if opt_ts.is_none() && opt_hostname.is_none() && opt_ident_and_pid.is_none() {
+                    string_msg.strip_prefix(' ').unwrap_or(&string_msg).to_string()
+                } else {
+                    string_msg.to_string()
+                }},
             full_message: String::from_utf8_lossy(input).to_string(),
         },
     )(input)
@@ -257,4 +263,68 @@ fn test_full_msg_with_timestamp() {
     assert_eq!(remaining, b"");
     assert_eq!(msg.priority, 6);
     assert_eq!(msg.facility, "cron");
+    assert_eq!(msg.source_timestamp.year(), Local::today().year());
+    assert_eq!(msg.source_timestamp.month(), 8);
+    assert_eq!(msg.source_timestamp.day(), 2);
+    assert_eq!(msg.source_timestamp.hour(), 9);
+    assert_eq!(msg.source_timestamp.minute(), 0);
+    assert_eq!(msg.source_timestamp.second(), 0);
+    assert_eq!(msg.identifier, Some("crond".to_string()));
+    assert_eq!(msg.pid, Some(926));
+    assert_eq!(msg.message, "USER root pid 14786 cmd logger -p syslog.info -- -- MARK --".to_string())
+}
+
+#[test]
+fn test_full_message_ident_no_pid() {
+    let result = parse_syslog(b"<46>Aug  1 19:00:00 root: -- MARK --");
+    assert!(result.is_ok());
+    let (remaining, msg) = result.unwrap();
+    assert_eq!(remaining, b"");
+    assert_eq!(msg.priority, 6);
+    assert_eq!(msg.facility, "syslog");
+    assert_eq!(msg.source_timestamp.year(), Local::today().year());
+    assert_eq!(msg.source_timestamp.month(), 8);
+    assert_eq!(msg.source_timestamp.day(), 1);
+    assert_eq!(msg.source_timestamp.hour(), 19);
+    assert_eq!(msg.source_timestamp.minute(), 0);
+    assert_eq!(msg.source_timestamp.second(), 0);
+    assert_eq!(msg.hostname, None);
+    assert_eq!(msg.identifier, Some("root".to_string()));
+    assert_eq!(msg.pid, None);
+    assert_eq!(msg.message, "-- MARK --".to_string())
+}
+
+#[test]
+fn test_full_msg_no_timestamp() {
+    let result = parse_syslog(b"<7> [0]DAA FXO: ON-HOOK, PARA HANDSET: OFF-HOOK");
+    assert!(result.is_ok());
+    let (remaining, msg) = result.unwrap();
+    assert_eq!(remaining, b"");
+    assert_eq!(msg.priority, 7);
+    assert_eq!(msg.facility, "kern");
+    assert_eq!(msg.source_timestamp.year(), Local::today().year());
+    assert_eq!(msg.source_timestamp.month(), Local::today().month());
+    assert_eq!(msg.source_timestamp.day(), Local::today().day());
+    assert_eq!(msg.hostname, None);
+    assert_eq!(msg.identifier, None);
+    assert_eq!(msg.pid, None);
+    assert_eq!(msg.message, "[0]DAA FXO: ON-HOOK, PARA HANDSET: OFF-HOOK".to_string())
+}
+
+#[test]
+fn test_bare_message() {
+    let result = parse_syslog(b"<7> register callback");
+    assert!(result.is_ok());
+    let (remaining, msg) = result.unwrap();
+    assert_eq!(remaining, b"");
+    assert_eq!(msg.priority, 7);
+    assert_eq!(msg.facility, "kern");
+    assert_eq!(msg.source_timestamp.year(), Local::today().year());
+    assert_eq!(msg.source_timestamp.month(), Local::today().month());
+    assert_eq!(msg.source_timestamp.day(), Local::today().day());
+    assert_eq!(msg.hostname, None);
+    assert_eq!(msg.identifier, None);
+    assert_eq!(msg.pid, None);
+    assert_eq!(msg.message, "register callback".to_string())
+
 }

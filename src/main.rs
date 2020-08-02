@@ -391,7 +391,6 @@ fn extract_gelf_fields<'a>(schema: &[OurSchema<'a>], msg: gelf::GELFMessage) -> 
     } = msg;
     let mut map = HashMap::new();
     map.insert("message", Value::String(short_message));
-    // TODO: optional hostname
     map.insert("hostname", Value::String(host));
     for field in schema {
         for gelf_field in field.from_gelf {
