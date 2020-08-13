@@ -589,7 +589,11 @@ lazy_static! {
         OurSchema {
             name: "syslog_facility",
             kind: FieldType::String,
-            from_gelf: &[Convert::None("facility"), Convert::None("_SYSLOG_FACILITY")],
+            from_gelf: &[
+                Convert::None("facility"),
+                Convert::None("_facility"),
+                Convert::None("_SYSLOG_FACILITY")
+            ],
         },
         OurSchema {
             name: "syslog_identifier",
