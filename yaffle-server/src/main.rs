@@ -1,12 +1,10 @@
 use std::collections::HashMap;
 use std::error::Error;
-use std::net::{IpAddr, SocketAddr};
+use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::stream::StreamExt;
 
-use chrono::{DateTime, NaiveDateTime, Utc};
-use dns_lookup::lookup_addr;
 use futures::future::join_all;
 use futures::stream::FuturesOrdered;
 use futures_batch::ChunksTimeoutStreamExt;
@@ -15,21 +13,22 @@ use listenfd::ListenFd;
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use tantivy::schema::{Schema, SchemaBuilder, FAST, INDEXED, STORED, STRING, TEXT};
+use tantivy::schema::Schema;
 use tantivy::space_usage::SearcherSpaceUsage;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::task;
 use tokio::time::delay_for;
 use toshi::{Client, HyperToshi, IndexOptions};
 
 mod gelf;
 mod query;
+mod schema;
 mod syslog;
 mod websrv;
 
-type JsonMap<'a> = HashMap<&'a str, Value>;
+use schema::{Document, YaffleSchema};
+
 type JsonOwnedKeysMap = HashMap<String, Value>;
 type DefaultHyperToshi =
     HyperToshi<hyper::client::HttpConnector<hyper::client::connect::dns::GaiResolver>>;
@@ -263,14 +262,6 @@ async fn find_index(toshi_url: &str, max_docs: u32) -> Result<u32, Box<dyn Error
     Ok(0)
 }
 
-pub fn get_our_schema_map() -> &'static HashMap<&'static str, &'static OurSchema<'static>> {
-    &OUR_SCHEMA_MAP
-}
-
-pub fn get_tantivy_schema() -> &'static Schema {
-    &TANTIVY_SCHEMA
-}
-
 const COMMIT_EVERY_SECS: u32 = 10;
 const BATCH_SIZE: usize = 10;
 
@@ -278,19 +269,6 @@ const BATCH_SIZE: usize = 10;
 enum Incoming {
     Gelf(gelf::GELFMessage),
     Syslog(syslog::SyslogMessage),
-}
-
-async fn do_reverse_dns(doc: &mut JsonMap<'_>, src_ip: IpAddr) {
-    if !doc.contains_key("hostname") {
-        doc.insert(
-            "hostname",
-            task::spawn_blocking(move || lookup_addr(&src_ip))
-                .await
-                .unwrap_or(Ok(src_ip.to_string()))
-                .unwrap_or(src_ip.to_string())
-                .into(),
-        );
-    }
 }
 
 async fn async_dual_main(
@@ -318,562 +296,66 @@ async fn async_dual_main(
     while let Some(mut chunk) = chunks.next().await {
         debug!("Processing a batch of {} message(s)", chunk.len());
         let index_name = &settings.lock().unwrap().index_name();
-        join_all(chunk.drain(..).filter_map(|(src, record)| {
-            let mut doc = match record {
-                Incoming::Gelf(msg) => extract_gelf_fields(&OUR_SCHEMA, msg),
-                Incoming::Syslog(msg) => extract_syslog_fields(&OUR_SCHEMA, msg),
+        let mut batch_results = join_all(chunk.drain(..).filter_map(|(src, record)| {
+            let doc_result = match record {
+                Incoming::Gelf(msg) => Document::from_gelf(&msg),
+                Incoming::Syslog(msg) => Document::from_syslog(&msg),
             };
 
-            if doc.len() > 0 {
-                let commit = if last_commit.elapsed() >= commit_every {
-                    last_commit = Instant::now();
-                    true
-                } else {
-                    false
-                };
-                let src_ip = src.ip();
-                Some(async move {
-                    do_reverse_dns(&mut doc, src_ip).await;
-                    c.add_document(index_name, Some(IndexOptions { commit }), doc)
-                        .await
-                })
-            } else {
-                warn!("Empty document extracted");
-                None
-            }
-        }))
-        .await
-        .iter()
-        .for_each(|result| match result {
-            Ok(response) => {
-                if !response.status().is_success() {
-                    warn!("Error response from add_document: {:?}", response)
+            match doc_result {
+                Ok(mut doc) if doc.is_valid() => {
+                    let commit = if last_commit.elapsed() >= commit_every {
+                        last_commit = Instant::now();
+                        true
+                    } else {
+                        false
+                    };
+                    let src_ip = src.ip();
+                    Some(async move {
+                        doc.do_reverse_dns(src_ip).await;
+                        c.add_document(index_name, Some(IndexOptions { commit }), doc)
+                            .await
+                    })
+                }
+                Ok(invalid_doc) => {
+                    warn!("Invalid document extracted: {:?}", invalid_doc);
+                    None
+                }
+                Err(e) => {
+                    warn!("Document parsing error: {}", e);
+                    None
                 }
             }
-            Err(e) => warn!("Failed to insert document: {}", e),
-        });
+        }))
+        .await;
+        for result in batch_results.drain(..) {
+            match result {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        let response_msg =
+                            format!("Error response from add_document: {:?}", response);
+                        match response
+                            .into_body()
+                            .collect::<Result<bytes::Bytes, _>>()
+                            .await
+                        {
+                            Ok(bytes) => warn!(
+                                "{}: {}",
+                                response_msg,
+                                String::from_utf8_lossy(bytes.as_ref())
+                            ),
+                            Err(e) => warn!("{}: body read error: {}", response_msg, e),
+                        }
+                    }
+                }
+                Err(e) => warn!("Failed to insert document: {}", e),
+            }
+        }
     }
 
     Ok(())
 }
 
-fn extract_syslog_fields<'a>(_schema: &'a [OurSchema], msg: syslog::SyslogMessage) -> JsonMap<'a> {
-    let mut map = HashMap::new();
-    map.insert("priority", Value::Number(msg.priority.into()));
-    map.insert("syslog_facility", Value::String(msg.facility));
-    map.insert(
-        "source_timestamp",
-        Value::Number(
-            (msg.source_timestamp.timestamp() * 1_000_000i64
-                + msg.source_timestamp.timestamp_subsec_micros() as i64)
-                .into(),
-        ),
-    );
-    if let Some(ref hostname) = msg.hostname {
-        map.insert("hostname", Value::String(hostname.to_string()));
-    }
-    if let Some(ref identifier) = msg.identifier {
-        map.insert("syslog_identifier", Value::String(identifier.to_string()));
-    }
-    if let Some(pid) = msg.pid {
-        map.insert("syslog_pid", Value::Number(pid.into()));
-    }
-    map.insert("message", Value::String(msg.message.clone()));
-    map.insert("full_message", Value::String(msg.full_message.clone()));
-    map
-}
-
-fn extract_gelf_fields<'a>(schema: &[OurSchema<'a>], msg: gelf::GELFMessage) -> JsonMap<'a> {
-    let gelf::GELFMessage {
-        version: _,
-        host,
-        short_message,
-        other,
-    } = msg;
-    let mut map = HashMap::new();
-    map.insert("message", Value::String(short_message));
-    map.insert("hostname", Value::String(host));
-    for field in schema {
-        for gelf_field in field.from_gelf {
-            let field_name = match gelf_field {
-                Convert::None(f)
-                | Convert::FloatSecToUsec(f)
-                | Convert::SyslogTimestamp(f)
-                | Convert::HexToUint(f) => f,
-            };
-            if let Some(msg_val) = other.get(*field_name) {
-                // Convert type to Tantivy type
-                convert(msg_val, gelf_field, &field.kind)
-                    .and_then(|converted| Ok(map.insert(field.name, converted)))
-                    .unwrap_or_else(|e| {
-                        warn!(
-                            "Unable to convert GELF field {} containing {} to {}: {}",
-                            field_name, msg_val, field.name, e
-                        );
-                        None
-                    });
-            }
-        }
-    }
-    map
-}
-
-fn convert(
-    input: &Value,
-    input_conversion: &Convert,
-    field_type: &FieldType,
-) -> Result<Value, Box<dyn Error>> {
-    match (field_type, input) {
-        (FieldType::String, Value::String(s)) | (FieldType::Text, Value::String(s)) => {
-            Ok(Value::String(s.to_string()))
-        }
-        (FieldType::String, anything) | (FieldType::Text, anything) => {
-            Ok(Value::String(anything.to_string()))
-        }
-        (FieldType::U64, Value::String(s)) => Ok(Value::Number(
-            if let Convert::HexToUint(_) = input_conversion {
-                u64::from_str_radix(s, 16)?.into()
-            } else {
-                s.parse::<u64>()?.into()
-            },
-        )),
-        (FieldType::U64, Value::Number(n)) if n.is_u64() => Ok(input.clone()),
-        (FieldType::U64, other) => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Can't represent {} as u64", other),
-        ))),
-        (FieldType::I64, Value::String(s)) => Ok(Value::Number(
-            if let Convert::HexToUint(_) = input_conversion {
-                i64::from_str_radix(s, 16)?.into()
-            } else {
-                s.parse::<i64>()?.into()
-            },
-        )),
-        (FieldType::I64, Value::Number(n)) if n.is_i64() => Ok(input.clone()),
-        (FieldType::I64, other) => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Can't represent {} as i64", other),
-        ))),
-        (FieldType::Timestamp, Value::String(s)) => match input_conversion {
-            Convert::None(_) => Ok(s.parse::<u64>()?.into()),
-            Convert::HexToUint(_) => Ok(u64::from_str_radix(s, 16)?.into()),
-            Convert::FloatSecToUsec(_) => {
-                let v: f64 = s.parse()?;
-                Ok(((v * 1_000_000f64) as u64).into())
-            }
-            Convert::SyslogTimestamp(_) => Ok(DateTime::parse_from_rfc3339(s)
-                .map(|dt| dt.timestamp_nanos() / 1000)
-                .or_else(|_e| DateTime::parse_from_rfc2822(s).map(|dt| dt.timestamp_nanos() / 1000))
-                .or_else(|_e| {
-                    /* TODO: local time? */
-                    let now_s = format!("{} {}", Utc::now().format("%Y"), s);
-                    NaiveDateTime::parse_from_str(&now_s, "%Y %b %e %T")
-                        .map(|naive| naive.timestamp_nanos() / 1000)
-                })?
-                .into()),
-        },
-        (FieldType::Timestamp, Value::Number(n)) => match input_conversion {
-            Convert::None(_) => Ok(Value::Number(
-                input
-                    .as_u64()
-                    .ok_or(std::io::Error::new(
-                        std::io::ErrorKind::InvalidData,
-                        format!("Can't represent {} as u64", input),
-                    ))?
-                    .into(),
-            )),
-            Convert::FloatSecToUsec(_) => {
-                let n_usec = n.as_f64().ok_or(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("Can't represent {} as f64", n),
-                ))? * 1_000_000f64;
-                Ok(Value::Number((n_usec as u64).into()))
-            }
-            Convert::SyslogTimestamp(_) => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Can't convert {} as syslog timestamp", n),
-            ))),
-            Convert::HexToUint(_) => Err(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                format!("Can't convert {} as hex", n),
-            ))),
-        },
-        (FieldType::Timestamp, other) => Err(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Can't use {} as timestamp", other),
-        ))),
-    }
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum Convert<'a> {
-    FloatSecToUsec(&'a str),
-    SyslogTimestamp(&'a str),
-    HexToUint(&'a str),
-    None(&'a str),
-}
-
-#[derive(Debug)]
-enum FieldType {
-    String,
-    Text,
-    U64,
-    I64,
-    Timestamp,
-}
-
-pub struct OurSchema<'a> {
-    name: &'a str,
-    kind: FieldType,
-    from_gelf: &'a [Convert<'a>],
-}
-
-impl OurSchema<'_> {
-    fn get_type(&self) -> &FieldType {
-        &self.kind
-    }
-}
-
 lazy_static! {
-    static ref OUR_SCHEMA: &'static [OurSchema<'static>] = &[
-        OurSchema {
-            name: "message",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("short_message")],
-        },
-        OurSchema {
-            name: "full_message",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("full_message")],
-        },
-        OurSchema {
-            name: "message_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_MESSAGE_ID")],
-        },
-        OurSchema {
-            name: "priority",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("level"), Convert::None("_PRIORITY")],
-        },
-        OurSchema {
-            name: "code_file",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("file"), Convert::None("_CODE_FILE")],
-        },
-        OurSchema {
-            name: "code_line",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("line"), Convert::None("_CODE_LINE")],
-        },
-        OurSchema {
-            name: "code_func",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_CODE_FUNC"), Convert::None("_function")],
-        },
-        OurSchema {
-            name: "errno",
-            kind: FieldType::I64,
-            from_gelf: &[Convert::None("_ERRNO")],
-        },
-        OurSchema {
-            name: "invocation_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_INVOCATION_ID")],
-        },
-        OurSchema {
-            name: "user_invocation_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_USER_INVOCATION_ID")],
-        },
-        OurSchema {
-            name: "syslog_facility",
-            kind: FieldType::String,
-            from_gelf: &[
-                Convert::None("facility"),
-                Convert::None("_facility"),
-                Convert::None("_SYSLOG_FACILITY")
-            ],
-        },
-        OurSchema {
-            name: "syslog_identifier",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_SYSLOG_IDENTIFIER")],
-        },
-        OurSchema {
-            name: "syslog_pid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_SYSLOG_PID")],
-        },
-        OurSchema {
-            name: "syslog_timestamp",
-            kind: FieldType::Timestamp,
-            from_gelf: &[Convert::SyslogTimestamp("_SYSLOG_TIMESTAMP")],
-        },
-        OurSchema {
-            name: "pid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_PID")],
-        },
-        OurSchema {
-            name: "uid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_UID")],
-        },
-        OurSchema {
-            name: "gid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_GID")],
-        },
-        OurSchema {
-            name: "comm",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_COMM")],
-        },
-        OurSchema {
-            name: "exe",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_EXE")],
-        },
-        OurSchema {
-            name: "cmdline",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_CMDLINE")],
-        },
-        OurSchema {
-            name: "cap_effective",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::HexToUint("_CAP_EFFECTIVE")],
-        },
-        OurSchema {
-            name: "audit_session",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_AUDIT_SESSION")],
-        },
-        OurSchema {
-            name: "audit_loginuid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_AUDIT_LOGINUID")],
-        },
-        OurSchema {
-            name: "systemd_cgroup",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_SYSTEMD_CGROUP")],
-        },
-        OurSchema {
-            name: "systemd_slice",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_SYSTEMD_SLICE")],
-        },
-        OurSchema {
-            name: "systemd_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_SYSTEMD_UNIT")],
-        },
-        OurSchema {
-            name: "systemd_user_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_SYSTEMD_USER_UNIT")],
-        },
-        OurSchema {
-            name: "systemd_user_slice",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_SYSTEMD_USER_SLICE")],
-        },
-        OurSchema {
-            name: "systemd_session",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_SYSTEMD_SESSION")],
-        },
-        OurSchema {
-            name: "systemd_owner_uid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_SYSTEMD_OWNER_UID")],
-        },
-        OurSchema {
-            name: "selinux_context",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_SELINUX_CONTEXT")],
-        },
-        OurSchema {
-            name: "source_timestamp",
-            kind: FieldType::Timestamp,
-            from_gelf: &[
-                Convert::FloatSecToUsec("timestamp"),
-                Convert::None("_SOURCE_REALTIME_TIMESTAMP")
-            ],
-        },
-        OurSchema {
-            name: "boot_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_BOOT_ID")],
-        },
-        OurSchema {
-            name: "machine_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_MACHINE_ID")],
-        },
-        OurSchema {
-            name: "systemd_invocation_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_SYSTEMD_INVOCATION_ID")],
-        },
-        OurSchema {
-            name: "hostname",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("host"), Convert::None("_HOSTNAME")],
-        },
-        OurSchema {
-            name: "transport",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_TRANSPORT")],
-        },
-        OurSchema {
-            name: "stream_id",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_STREAM_ID")],
-        },
-        OurSchema {
-            name: "line_break",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_LINE_BREAK")],
-        },
-        OurSchema {
-            name: "namespace",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_NAMESPACE")],
-        },
-        OurSchema {
-            name: "kernel_device",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_KERNEL_DEVICE")],
-        },
-        OurSchema {
-            name: "kernel_subsystem",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_KERNEL_SUBSYSTEM")],
-        },
-        OurSchema {
-            name: "udev_sysname",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_UDEV_SYSNAME")],
-        },
-        OurSchema {
-            name: "udev_devnode",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_UDEV_DEVNODE")],
-        },
-        OurSchema {
-            name: "udev_devlink",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_UDEV_DEVLINK")],
-        },
-        OurSchema {
-            name: "coredump_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_COREDUMP_UNIT")],
-        },
-        OurSchema {
-            name: "coredump_user_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_COREDUMP_USER_UNIT")],
-        },
-        OurSchema {
-            name: "object_pid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_PID")],
-        },
-        OurSchema {
-            name: "object_uid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_UID")],
-        },
-        OurSchema {
-            name: "object_gid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_GID")],
-        },
-        OurSchema {
-            name: "object_comm",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_OBJECT_COMM")],
-        },
-        OurSchema {
-            name: "object_exe",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_OBJECT_EXE")],
-        },
-        OurSchema {
-            name: "object_cmdline",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_OBJECT_CMDLINE")],
-        },
-        OurSchema {
-            name: "object_audit_session",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_AUDIT_SESSION")],
-        },
-        OurSchema {
-            name: "object_audit_loginuid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_AUDIT_LOGINUID")],
-        },
-        OurSchema {
-            name: "object_systemd_cgroup",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_OBJECT_SYSTEMD_CGROUP")],
-        },
-        OurSchema {
-            name: "object_systemd_session",
-            kind: FieldType::String,
-            from_gelf: &[Convert::None("_OBJECT_SYSTEMD_SESSION")],
-        },
-        OurSchema {
-            name: "object_systemd_owner_uid",
-            kind: FieldType::U64,
-            from_gelf: &[Convert::None("_OBJECT_SYSTEMD_OWNER_UID")],
-        },
-        OurSchema {
-            name: "object_systemd_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_OBJECT_SYSTEMD_UNIT")],
-        },
-        OurSchema {
-            name: "object_systemd_user_unit",
-            kind: FieldType::Text,
-            from_gelf: &[Convert::None("_OBJECT_SYSTEMD_USER_UNIT")],
-        },
-        OurSchema {
-            name: "recv_rt_timestamp",
-            kind: FieldType::Timestamp,
-            from_gelf: &[Convert::None("___REALTIME_TIMESTAMP")],
-        },
-        OurSchema {
-            name: "recv_mt_timestamp",
-            kind: FieldType::Timestamp,
-            from_gelf: &[Convert::None("___MONOTONIC_TIMESTAMP")],
-        },
-    ];
-    static ref TANTIVY_SCHEMA: Schema = {
-        let mut schema_builder = SchemaBuilder::default();
-        for field in OUR_SCHEMA.iter() {
-            match field.kind {
-                FieldType::String => schema_builder.add_text_field(field.name, STORED | STRING),
-                FieldType::Text => schema_builder.add_text_field(field.name, STORED | TEXT),
-                FieldType::U64 => schema_builder.add_u64_field(field.name, STORED | INDEXED),
-                FieldType::I64 => schema_builder.add_i64_field(field.name, STORED | INDEXED),
-                FieldType::Timestamp => {
-                    schema_builder.add_u64_field(field.name, INDEXED | STORED | FAST)
-                }
-            };
-        }
-        schema_builder.build()
-    };
-    static ref OUR_SCHEMA_MAP: HashMap<&'static str, &'static OurSchema<'static>> = {
-        let mut map = HashMap::new();
-        for field in OUR_SCHEMA.iter() {
-            map.insert(field.name, field);
-        }
-        map
-    };
+    static ref TANTIVY_SCHEMA: Schema = Document::tantivy_schema();
 }

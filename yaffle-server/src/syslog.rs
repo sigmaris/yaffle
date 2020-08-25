@@ -23,7 +23,7 @@ pub struct SyslogMessage {
     pub(crate) source_timestamp: DateTime<FixedOffset>,
     pub(crate) hostname: Option<String>,
     pub(crate) identifier: Option<String>,
-    pub(crate) pid: Option<u32>,
+    pub(crate) pid: Option<u64>,
     pub(crate) message: String,
     pub(crate) full_message: String,
 }
@@ -149,7 +149,7 @@ fn hostname(input: &[u8]) -> IResult<&[u8], &[u8]> {
     )(input)
 }
 
-fn identifier_and_pid(input: &[u8]) -> IResult<&[u8], (&[u8], Option<u32>)> {
+fn identifier_and_pid(input: &[u8]) -> IResult<&[u8], (&[u8], Option<u64>)> {
     terminated(
         tuple((
             take_while1(|ch| ch != b':' && ch != b'[' && !is_space(ch)),
@@ -158,7 +158,7 @@ fn identifier_and_pid(input: &[u8]) -> IResult<&[u8], (&[u8], Option<u32>)> {
                     preceded(tag("["), terminated(digit1, tag("]"))),
                     std::str::from_utf8,
                 ),
-                |s| u32::from_str_radix(s, 10),
+                |s| u64::from_str_radix(s, 10),
             )),
         )),
         tag(": "),

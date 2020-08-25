@@ -1,4 +1,6 @@
 extern crate proc_macro;
+use std::collections::HashMap;
+
 use proc_macro2::{Ident, Span, TokenStream};
 use quote::{quote, quote_spanned};
 use syn::{
@@ -15,14 +17,29 @@ fn gelf_accessor(ident: &Ident, field: &str) -> TokenStream {
     }
 }
 
+fn syslog_accessor(ident: &Ident, field: &str) -> TokenStream {
+    let field_ident = Ident::new(field, Span::call_site());
+    if field == "priority"
+        || field == "facility"
+        || field == "source_timestamp"
+        || field == "message"
+        || field == "full_message"
+    {
+        quote! { ::std::option::Option::Some(#ident.#field_ident.clone().into()) }
+    } else {
+        quote! { #ident.#field_ident.clone().into() }
+    }
+}
+
 fn constructor_expr(
     dest_field: &Ident,
-    gelf_ident: &Ident,
-    gelf_fields: &Vec<FieldValueConversion>,
+    source_ident: &Ident,
+    source_fields: &Vec<FieldValueConversion>,
+    syslog: bool,
 ) -> TokenStream {
     let mut expr = None;
-    for gelf_field in gelf_fields {
-        let accessor = gelf_field.conversion_expr(&gelf_ident);
+    for source_field in source_fields {
+        let accessor = source_field.conversion_expr(&source_ident, syslog);
         expr = expr
             .map(|existing| quote! { #existing.or(#accessor) })
             .or(Some(accessor));
@@ -37,6 +54,7 @@ enum FieldValueConversion {
     FloatSecToUsec(String),
     HexToUint(String),
     SyslogTimestamp(String),
+    DateTimeToUsec(String),
 }
 
 impl FieldValueConversion {
@@ -46,110 +64,285 @@ impl FieldValueConversion {
             "float_sec_to_usec" => Some(Self::FloatSecToUsec(fieldname)),
             "hex_to_uint" => Some(Self::HexToUint(fieldname)),
             "syslog_timestamp" => Some(Self::SyslogTimestamp(fieldname)),
+            "datetime_to_usec" => Some(Self::DateTimeToUsec(fieldname)),
             _ => None,
         }
     }
 
-    fn conversion_expr(&self, gelf_ident: &Ident) -> TokenStream {
+    fn conversion_expr(&self, source_ident: &Ident, syslog: bool) -> TokenStream {
         match self {
             Self::None(field) => {
-                let accessor = gelf_accessor(gelf_ident, field);
-                quote! { #accessor.map(|val| ::serde_json::value::from_value(val.clone())).transpose()? }
+                if syslog {
+                    syslog_accessor(source_ident, field)
+                } else {
+                    let accessor = gelf_accessor(source_ident, field);
+                    quote! { #accessor.map(|val| {
+                        let prim_result = ::serde_json::value::from_value(val.clone());
+                        if prim_result.is_err() {
+                            if let ::serde_json::value::Value::String(ref some_str) = val {
+                                return some_str.parse().or(prim_result)
+                            }
+                        }
+                        prim_result
+                    }).transpose()? }
+                }
             }
             Self::FloatSecToUsec(field) => {
-                let accessor = gelf_accessor(gelf_ident, field);
+                let accessor = if syslog {
+                    let acc1 = syslog_accessor(source_ident, field);
+                    quote! { #acc1.map(::serde_json::to_value) }
+                } else {
+                    gelf_accessor(source_ident, field)
+                };
                 quote! { #accessor.map(|val| Self::convert_float_sec_to_usec(val)).transpose()? }
             }
             Self::HexToUint(field) => {
-                let accessor = gelf_accessor(gelf_ident, field);
+                let accessor = if syslog {
+                    let acc1 = syslog_accessor(source_ident, field);
+                    quote! { #acc1.map(::serde_json::to_value) }
+                } else {
+                    gelf_accessor(source_ident, field)
+                };
                 quote! { #accessor.map(|val| Self::convert_hex_to_uint(val)).transpose()? }
             }
             Self::SyslogTimestamp(field) => {
-                let accessor = gelf_accessor(gelf_ident, field);
+                let accessor = if syslog {
+                    let acc1 = syslog_accessor(source_ident, field);
+                    quote! { #acc1.map(::serde_json::to_value) }
+                } else {
+                    gelf_accessor(source_ident, field)
+                };
                 quote! { #accessor.map(|val| Self::convert_syslog_timestamp(val)).transpose()? }
+            }
+            Self::DateTimeToUsec(field) => {
+                let accessor = if syslog {
+                    syslog_accessor(source_ident, field)
+                } else {
+                    gelf_accessor(source_ident, field)
+                };
+                quote! { #accessor.map(|val| Self::convert_datetime_to_usec(val)) }
             }
         }
     }
 }
 
-#[proc_macro_derive(YaffleSchema, attributes(from_gelf, gelf_convert))]
+#[derive(Debug)]
+enum TantivyType {
+    String,
+    Text,
+    U64,
+    I64,
+    Timestamp,
+}
+
+impl TantivyType {
+    fn from_attribute(attr: &str) -> Option<Self> {
+        match attr {
+            "string" => Some(Self::String),
+            "text" => Some(Self::Text),
+            "u64" => Some(Self::U64),
+            "i64" => Some(Self::I64),
+            "timestamp" => Some(Self::Timestamp),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug)]
+enum FormatOption {
+    SyslogPriority,
+    Hex,
+}
+
+impl FormatOption {
+    fn from_attribute(attr: &str) -> Option<Self> {
+        match attr {
+            "syslog_priority" => Some(Self::SyslogPriority),
+            "hex" => Some(Self::Hex),
+            _ => None,
+        }
+    }
+}
+
+fn process_inner_attr(inner: &NestedMeta) -> Option<FieldValueConversion> {
+    match inner {
+        NestedMeta::Meta(Meta::Path(inner_path)) => {
+            // TODO: check error coming from from_attribute
+            inner_path
+                .get_ident()
+                .map(|i| FieldValueConversion::from_attribute(i.to_string(), "none"))
+                .flatten()
+        }
+        NestedMeta::Meta(Meta::NameValue(MetaNameValue {
+            path,
+            lit: Lit::Str(conv),
+            ..
+        })) => path
+            .get_ident()
+            .map(|i| FieldValueConversion::from_attribute(i.to_string(), &conv.value()))
+            .flatten(),
+        NestedMeta::Lit(Lit::Str(lit_str)) => {
+            FieldValueConversion::from_attribute(lit_str.value(), "none")
+        }
+        _ => {
+            None /* TODO: should really error */
+        }
+    }
+}
+
+#[proc_macro_derive(YaffleSchema, attributes(from_gelf, from_syslog, toshi_type, format))]
 pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let input_span = input.span();
     let name = input.ident;
     let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-    let mut fields: Vec<(Ident, Vec<FieldValueConversion>)> = vec![];
+    let mut from_gelf_fields: Vec<(Ident, Vec<FieldValueConversion>)> = vec![];
+    let mut from_syslog_fields: Vec<(Ident, Vec<FieldValueConversion>)> = vec![];
+    let mut tantivy_fields: Vec<(String, TantivyType)> = vec![];
+    let mut format_options: HashMap<String, FormatOption> = HashMap::new();
     match input.data {
         Data::Struct(DataStruct {
             fields: Fields::Named(FieldsNamed { named, .. }),
             ..
         }) => {
             for field in named {
-                let mut from_gelf: Vec<FieldValueConversion> =
-                    Vec::with_capacity(field.attrs.len());
+                let mut from_gelf: Vec<FieldValueConversion> = Vec::new();
+                let mut from_syslog: Vec<FieldValueConversion> = Vec::new();
                 for attr in field.attrs {
                     match attr.parse_meta() {
                         Ok(Meta::List(list)) if list.path.is_ident("from_gelf") => {
-                            for gelf_field in list.nested.iter().filter_map(|inner| match inner {
-                                NestedMeta::Meta(Meta::Path(inner_path)) => {
-                                    // TODO: check error coming from from_attribute
-                                    inner_path
-                                        .get_ident()
-                                        .map(|i| {
-                                            FieldValueConversion::from_attribute(
-                                                i.to_string(),
-                                                "none",
-                                            )
-                                        })
-                                        .flatten()
-                                }
-                                NestedMeta::Meta(Meta::NameValue(MetaNameValue {
-                                    path,
-                                    lit: Lit::Str(conv),
-                                    ..
-                                })) => path
-                                    .get_ident()
-                                    .map(|i| {
-                                        FieldValueConversion::from_attribute(
-                                            i.to_string(),
-                                            &conv.value(),
-                                        )
-                                    })
-                                    .flatten(),
-                                NestedMeta::Lit(Lit::Str(lit_str)) => {
-                                    FieldValueConversion::from_attribute(lit_str.value(), "none")
-                                }
-                                _ => {
-                                    None /* TODO: should really error */
-                                }
-                            }) {
+                            for gelf_field in list.nested.iter().filter_map(process_inner_attr) {
                                 from_gelf.push(gelf_field);
                             }
                         }
-                        _ => {
-                            return quote_spanned!{input_span=> compile_error!("This macro must be used on a struct with named fields")}.into();
+                        Ok(Meta::List(list)) if list.path.is_ident("from_syslog") => {
+                            for syslog_field in list.nested.iter().filter_map(process_inner_attr) {
+                                from_syslog.push(syslog_field);
+                            }
                         }
+                        Ok(Meta::NameValue(MetaNameValue {
+                            path,
+                            lit: Lit::Str(typename),
+                            ..
+                        })) if path.is_ident("toshi_type") => tantivy_fields.push((
+                            field.ident.as_ref().unwrap().to_string(),
+                            TantivyType::from_attribute(&typename.value()).unwrap(),
+                        )),
+                        Ok(Meta::NameValue(MetaNameValue {
+                            path,
+                            lit: Lit::Str(fmt),
+                            ..
+                        })) if path.is_ident("format") => {
+                            format_options.insert(
+                                field.ident.as_ref().unwrap().to_string(),
+                                FormatOption::from_attribute(&fmt.value()).unwrap(),
+                            );
+                        }
+                        _ => {}
                     }
                 }
-                fields.push((field.ident.unwrap(), from_gelf));
+                from_gelf_fields.push((field.ident.clone().unwrap(), from_gelf));
+                from_syslog_fields.push((field.ident.unwrap(), from_syslog));
             }
         }
-        _ => {}
+        _ => {
+            return quote_spanned!{input_span=> compile_error!("This macro must be used on a struct with named fields")}.into();
+        }
     }
 
-    let construct_exprs: Vec<TokenStream> = fields
+    let gelf_construct_exprs: Vec<TokenStream> = from_gelf_fields
         .iter()
         .map(|(field, from_gelfs)| {
-            constructor_expr(field, &Ident::new("msg", Span::call_site()), from_gelfs)
+            constructor_expr(
+                field,
+                &Ident::new("gelf_msg", Span::call_site()),
+                from_gelfs,
+                false,
+            )
         })
         .collect();
+    let syslog_construct_exprs: Vec<TokenStream> = from_syslog_fields
+        .iter()
+        .map(|(field, from_syslogs)| {
+            constructor_expr(
+                field,
+                &Ident::new("syslog_msg", Span::call_site()),
+                from_syslogs,
+                true,
+            )
+        })
+        .collect();
+    let schema_builder_stmts: Vec<TokenStream> = tantivy_fields.iter().map(|(field, tantivy_type)| match *tantivy_type {
+        TantivyType::String => quote!{ schema_builder.add_text_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::STRING) },
+        TantivyType::Text => quote!{ schema_builder.add_text_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::TEXT) },
+        TantivyType::U64 => quote!{ schema_builder.add_u64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
+        TantivyType::I64 => quote!{ schema_builder.add_i64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
+        TantivyType::Timestamp => quote!{ schema_builder.add_u64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED | ::tantivy::schema::FAST) },
+    }).collect();
+
+    // Statements to convert document to a map of fieldname->str for display
+    let to_display_stmts: Vec<TokenStream> = tantivy_fields.iter().map(|(field, tantivy_type)| {
+        let accessor = match *tantivy_type {
+            TantivyType::String | TantivyType::Text => quote!{ value.into() },
+            TantivyType::U64 | TantivyType::I64 => match format_options.get(field) {
+                Some(FormatOption::SyslogPriority) => quote!{
+                    format!("{} ({})", value, match value {
+                        0 => "Emergency",
+                        1 => "Alert",
+                        2 => "Critical",
+                        3 => "Error",
+                        4 => "Warning",
+                        5 => "Notice",
+                        6 => "Informational",
+                        7 => "Debug",
+                        _ => "Unknown",
+                    }).into()
+                },
+                Some(FormatOption::Hex) => quote!{ format!("0x{:x}", value).into() },
+                None => quote!{ value.to_string().into() },
+            },
+            TantivyType::Timestamp => quote!{ ::chrono::offset::Utc.timestamp_opt((value / 1_000_000) as i64, ((value % 1_000_000) * 1000) as u32)
+                .single()
+                .map(|dt| dt.to_string())
+                .unwrap_or("".to_string()).into()
+            }
+        };
+        let field_ident = Ident::new(field, Span::call_site());
+        quote! {
+            if let ::std::option::Option::Some(ref value) = document.#field_ident {
+                hashmap.insert(#field, #accessor);
+            }
+        }
+    }).collect();
 
     let expanded = quote! {
-        impl #impl_generics crate::YaffleSchema for #name #ty_generics #where_clause {
-            fn from_gelf(msg: &crate::GELFMessage) -> ::std::result::Result<#name, ::std::boxed::Box<dyn ::std::error::Error>> {
+        impl<'a> ::std::convert::From<&'a #name> for ::std::collections::HashMap<&'static str, ::std::borrow::Cow<'a, str>> {
+            fn from(document: &'a #name) -> Self {
+                use ::chrono::offset::TimeZone;
+                let mut hashmap = ::std::collections::HashMap::new();
+                #( #to_display_stmts )*
+                hashmap
+            }
+        }
+
+        impl #impl_generics crate::schema::YaffleSchema for #name #ty_generics #where_clause {
+            fn from_gelf(gelf_msg: &crate::gelf::GELFMessage) -> ::std::result::Result<#name, ::std::boxed::Box<dyn ::std::error::Error>> {
+                use ::std::convert::TryInto;
                 Ok(#name {
-                    #( #construct_exprs ),*
+                    #( #gelf_construct_exprs ),*
                 })
+            }
+
+            fn from_syslog(syslog_msg: &crate::syslog::SyslogMessage) -> ::std::result::Result<#name, ::std::boxed::Box<dyn ::std::error::Error>> {
+                Ok(#name {
+                    #( #syslog_construct_exprs ),*
+                })
+            }
+
+            fn tantivy_schema() -> ::tantivy::schema::Schema {
+                let mut schema_builder = ::tantivy::schema::SchemaBuilder::default();
+                #( #schema_builder_stmts; )*
+                schema_builder.build()
             }
         }
     };

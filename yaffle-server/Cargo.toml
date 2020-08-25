@@ -24,3 +24,4 @@ tantivy = "0.12"
 tokio = { version = "0.2", features = ["macros", "rt-threaded", "udp", "dns", "sync"] }
 toshi = { path = "../../Toshi/toshi-client", default-features = false, features = ["hyper_client"] }
 warp = "0.2"
+yaffle-macros = { path = "../yaffle-macros" }

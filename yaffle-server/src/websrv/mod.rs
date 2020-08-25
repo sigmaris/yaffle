@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
@@ -5,13 +6,12 @@ use std::convert::TryInto;
 use horrorshow::Template;
 use hyper::http::{header, StatusCode};
 use serde::Deserialize;
-use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use toshi::{Client, HyperToshi, Query, Search, SearchResults};
+use toshi::{Client, HyperToshi, Query, Search};
 use warp::{reply, Filter};
 
-use crate::{query::parse_query, SharedSettings};
+use crate::{query::parse_query, schema::Document, SharedSettings};
 
 mod templates;
 
@@ -62,7 +62,7 @@ fn search_route(
             };
             async move {
                 let mut response = c
-                    .search::<&str, HashMap<String, Value>>(
+                    .search::<&str, Document>(
                         &index_name,
                         Search {
                             query: Some(query),
@@ -75,15 +75,23 @@ fn search_route(
                 if let Err(e) = response {
                     warnings.push(format!("Error from Toshi: {}", e));
                     response = c
-                        .search::<&str, HashMap<String, Value>>(&index_name, default_search())
+                        .search::<&str, Document>(&index_name, default_search())
                         .await;
                 }
                 match response {
                     Ok(results) => {
-                        let fields = fieldset(&results);
+                        let hashmaps = results
+                            .get_docs()
+                            .iter()
+                            .map(|scored_doc| {
+                                let doc: &Document = &scored_doc.doc;
+                                doc.into()
+                            })
+                            .collect();
+                        let fields = fieldset(&hashmaps);
                         Ok::<String, warp::reject::Rejection>(
                             templates::base_page(templates::doc_list_content(
-                                &sp, &fields, &results, &warnings,
+                                &sp, &fields, &hashmaps, &warnings,
                             ))
                             .into_string()
                             .unwrap(),
@@ -105,21 +113,18 @@ fn field_custom_sort(a: &&str, b: &&str) -> Ordering {
     }
 }
 
-fn fieldset(results: &SearchResults<HashMap<String, Value>>) -> Vec<&str> {
+fn fieldset<'a>(results: &Vec<HashMap<&'a str, Cow<str>>>) -> Vec<&'a str> {
     let mut field_set = HashSet::new();
-    results
-        .get_docs()
-        .iter()
-        .fold(&mut field_set, |mut set, scored_doc| {
-            scored_doc.doc.keys().fold(&mut set, |inner_set, item| {
-                if item != "message" && item != "full_message" {
-                    inner_set.insert(item);
-                }
-                inner_set
-            });
-            set
+    results.iter().fold(&mut field_set, |mut set, doc| {
+        doc.keys().fold(&mut set, |inner_set, item| {
+            if *item != "message" && *item != "full_message" {
+                inner_set.insert(item);
+            }
+            inner_set
         });
-    let mut fields: Vec<&str> = field_set.drain().map(|s| (*s).as_str()).collect();
+        set
+    });
+    let mut fields: Vec<&str> = field_set.drain().map(|s| (*s)).collect();
     fields.sort_by(field_custom_sort);
     fields
 }

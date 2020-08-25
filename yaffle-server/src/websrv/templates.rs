@@ -1,14 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::borrow::Cow;
 
-use chrono::{TimeZone, Utc};
 use horrorshow::helper::doctype;
 use horrorshow::{owned_html, Raw, Render};
 use lazy_static::lazy_static;
-use serde_json::{Number, Value};
-use toshi::SearchResults;
 
 use super::SearchParams;
-use crate::{get_our_schema_map, FieldType};
 
 lazy_static! {
     static ref DEFAULT_FIELDS: HashSet<&'static str> = {
@@ -70,7 +67,7 @@ pub(crate) fn base_page<'a>(content: impl Render + 'a) -> impl Render + 'a {
 pub(crate) fn doc_list_content<'a>(
     sp: &'a SearchParams,
     fields: &'a Vec<&'a str>,
-    results: &'a SearchResults<HashMap<String, Value>>,
+    results: &'a Vec<HashMap<&'a str, Cow<str>>>,
     alerts: &'a Vec<String>,
 ) -> impl Render + 'a {
     owned_html! {
@@ -133,20 +130,20 @@ pub(crate) fn doc_list_content<'a>(
                             }
                         }
                         tbody {
-                            @for scored_doc in results.get_docs() {
+                            @for doc in results {
                                 tr {
                                     @for field in fields {
                                         td(class=format!("{}_col", field), style=if DEFAULT_FIELDS.contains(field) {""} else {"display: none"}) {
-                                            :format_value(scored_doc.doc.get(&field.to_string()), field)
+                                            :doc.get(field).map(|x| x.as_ref())
                                         }
                                     }
                                 }
                                 tr {
-                                    td(colspan=fields.len(), class="border-top-0") { code { :format_value(scored_doc.doc.get("message"), "message") } }
+                                    td(colspan=fields.len(), class="border-top-0") { code { :doc.get("message").map(|x| x.as_ref()) } }
                                 }
-                                @if scored_doc.doc.get("full_message").is_some() {
+                                @if doc.get("full_message").is_some() {
                                     tr {
-                                        td(colspan=fields.len(), class="border-top-0") { pre { code { :format_value(scored_doc.doc.get("full_message"), "full_message") } } }
+                                        td(colspan=fields.len(), class="border-top-0") { pre { code { :doc.get("full_message").map(|x| x.as_ref()) } } }
                                     }
                                 }
                             }
@@ -167,6 +164,7 @@ pub(crate) fn doc_list_content<'a>(
     }
 }
 
+/*
 fn lookup_severity(n: &Number) -> &'static str {
     match n.as_u64() {
         Some(0) => "Emergency",
@@ -221,3 +219,4 @@ fn format_value(val: Option<&Value>, field_name: &str) -> Result<String, std::io
         Ok("".to_string())
     }
 }
+*/
