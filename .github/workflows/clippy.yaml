@@ -18,3 +18,4 @@ jobs:
       with:
         workdir: yaffle
         level: warning
+        clippy_flags: '--verbose'
