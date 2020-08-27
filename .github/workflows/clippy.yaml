@@ -1,0 +1,12 @@
+name: clippy
+on: [pull_request]
+jobs:
+  clippy:
+    name: clippy
+    runs-on: ubuntu-20.04
+    steps:
+      - uses: actions/checkout@v2
+      - uses: sigmaris/action-clippy@master
+        with:
+          github_token: ${{ secrets.github_token }}
+          level: warning
