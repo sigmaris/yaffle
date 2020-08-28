@@ -2,7 +2,7 @@ name: clippy
 on: [pull_request]
 jobs:
   clippy:
-    name: clippy
+    name: Report clippy lints
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout yaffle
@@ -14,7 +14,8 @@ jobs:
       with:
         repository: sigmaris/Toshi
         path: Toshi
-    - uses: sigmaris/action-clippy@debian_image
+    - name: Run clippy
+      uses: sigmaris/action-clippy@debian_image
       with:
         workdir: yaffle
         level: warning
