@@ -218,7 +218,7 @@ fn simple(input: &str) -> IResult<&str, QueryTree> {
     alt((
         map(
             alt((fuzzy_term_q, exact_term_q, phrase_q, regex_q, range_q)),
-            |q| QueryTree::Simple(q),
+            QueryTree::Simple,
         ),
         parens,
         not,

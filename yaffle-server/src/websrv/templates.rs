@@ -17,7 +17,7 @@ lazy_static! {
         hs
     };
 }
-static RELTIMES: &'static [(i32, &'static str)] = &[
+static RELTIMES: &[(i32, &str)] = &[
     (1, "1m"),
     (5, "5m"),
     (15, "15m"),
@@ -66,9 +66,9 @@ pub(crate) fn base_page<'a>(content: impl Render + 'a) -> impl Render + 'a {
 
 pub(crate) fn doc_list_content<'a>(
     sp: &'a SearchParams,
-    fields: &'a Vec<&'a str>,
-    results: &'a Vec<HashMap<&'a str, Cow<str>>>,
-    alerts: &'a Vec<String>,
+    fields: &'a [&'a str],
+    results: &'a [HashMap<&'a str, Cow<str>>],
+    alerts: &'a [String],
 ) -> impl Render + 'a {
     owned_html! {
         nav(class="navbar navbar-light flex-md-nowrap p-0") {
@@ -163,60 +163,3 @@ pub(crate) fn doc_list_content<'a>(
         }
     }
 }
-
-/*
-fn lookup_severity(n: &Number) -> &'static str {
-    match n.as_u64() {
-        Some(0) => "Emergency",
-        Some(1) => "Alert",
-        Some(2) => "Critical",
-        Some(3) => "Error",
-        Some(4) => "Warning",
-        Some(5) => "Notice",
-        Some(6) => "Informational",
-        Some(7) => "Debug",
-        Some(_) => "Unknown",
-        None => "None",
-    }
-}
-
-fn format_value(val: Option<&Value>, field_name: &str) -> Result<String, std::io::Error> {
-    let schema_map = get_our_schema_map();
-    if let Some(v) = val {
-        match (
-            field_name,
-            schema_map.get(field_name).map(|s| s.get_type()),
-            v,
-        ) {
-            (_, Some(FieldType::Timestamp), Value::Number(n)) => n
-                .as_u64()
-                .map(|u| {
-                    Utc.timestamp_opt((u / 1_000_000) as i64, ((u % 1_000_000) * 1000) as u32)
-                        .single()
-                        .map(|dt| format!("{}", dt))
-                        .unwrap_or("".to_string())
-                })
-                .ok_or(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Can't get {} as u64", field_name),
-                )),
-            ("priority", Some(_), Value::Number(n)) => {
-                Ok(format!("{} ({})", n, lookup_severity(n)))
-            }
-            ("cap_effective", Some(FieldType::U64), Value::Number(n)) => Ok(n
-                .as_u64()
-                .map(|num| format!("0x{:x}", num))
-                .unwrap_or(n.to_string())),
-            (_, Some(_), Value::Number(n)) => Ok(n.to_string()),
-            (_, Some(_), Value::String(s)) => Ok(s.to_string()),
-            (_, Some(_), other) => Ok(other.to_string()),
-            (_, None, _) => Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("No such field named {} in schema", field_name),
-            )),
-        }
-    } else {
-        Ok("".to_string())
-    }
-}
-*/

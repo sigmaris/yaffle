@@ -31,7 +31,7 @@ pub(crate) trait YaffleSchema {
             Value::Number(n) => n
                 .as_f64()
                 .map(|v| (v * 1_000_000f64) as u64)
-                .ok_or(format!("Can't represent {} as f64", n).into()),
+                .ok_or_else(|| format!("Can't represent {} as f64", n).into()),
             Value::String(s) => Ok(s.parse().map(|v: f64| (v * 1_000_000f64) as u64)?),
             _ => Err(format!("Can't convert {} to u64", val).into()),
         }
@@ -42,7 +42,7 @@ pub(crate) trait YaffleSchema {
             Value::String(s) => Ok(u64::from_str_radix(&s, 16)?),
             Value::Number(n) => n
                 .as_u64()
-                .ok_or(format!("Can't represent {} as u64", n).into()),
+                .ok_or_else(|| format!("Can't represent {} as u64", n).into()),
             _ => Err(format!("Can't convert {} to u64", val).into()),
         }
     }
@@ -389,9 +389,8 @@ impl Document {
             self.hostname.replace(
                 task::spawn_blocking(move || lookup_addr(&src_ip))
                     .await
-                    .unwrap_or(Ok(src_ip.to_string()))
-                    .unwrap_or(src_ip.to_string())
-                    .into(),
+                    .unwrap_or_else(|_| Ok(src_ip.to_string()))
+                    .unwrap_or_else(|_| src_ip.to_string()),
             );
         }
     }
@@ -401,7 +400,7 @@ impl Document {
             && self
                 .message
                 .as_ref()
-                .map(|msg| msg.len() > 0)
+                .map(|msg| !msg.is_empty())
                 .unwrap_or(false)
     }
 }
