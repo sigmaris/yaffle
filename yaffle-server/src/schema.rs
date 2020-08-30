@@ -49,11 +49,11 @@ pub(crate) trait YaffleSchema {
 
     fn convert_syslog_timestamp(val: &Value) -> Result<u64, Box<dyn Error>> {
         if let Value::String(ref s) = val {
-            Ok(DateTime::parse_from_rfc3339(s)
+            Ok(DateTime::parse_from_rfc3339(s.trim())
                 .map(|dt| dt.timestamp_nanos() / 1000)
-                .or_else(|_e| DateTime::parse_from_rfc2822(s).map(|dt| dt.timestamp_nanos() / 1000))
+                .or_else(|_e| DateTime::parse_from_rfc2822(s.trim()).map(|dt| dt.timestamp_nanos() / 1000))
                 .or_else(|_e| {
-                    let now_s = format!("{} {}", Local::now().format("%Y"), s);
+                    let now_s = format!("{} {}", Local::now().format("%Y"), s.trim());
                     NaiveDateTime::parse_from_str(&now_s, "%Y %b %e %T")
                         .map(|naive| naive.timestamp_nanos() / 1000)
                 })? as u64)
@@ -65,7 +65,7 @@ pub(crate) trait YaffleSchema {
 
 #[derive(Clone, Debug, Serialize, Deserialize, YaffleSchema)]
 pub(crate) struct Document {
-    #[from_gelf(timestamp = "float_sec_to_usec", _SOURCE_REALTIME_TIMESTAMP)]
+    #[from_gelf(timestamp = "float_sec_to_usec", _SOURCE_REALTIME_TIMESTAMP, __SOURCE_REALTIME_TIMESTAMP)]
     #[from_syslog(source_timestamp = "datetime_to_usec")]
     #[toshi_type = "timestamp"]
     source_timestamp: Option<u64>,
@@ -151,113 +151,113 @@ pub(crate) struct Document {
     #[serde(skip_serializing_if = "Option::is_none")]
     syslog_timestamp: Option<u64>,
 
-    #[from_gelf(_PID)]
+    #[from_gelf(_PID, __PID)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     pid: Option<u64>,
 
-    #[from_gelf(_UID)]
+    #[from_gelf(_UID, __UID)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     uid: Option<u64>,
 
-    #[from_gelf(_GID)]
+    #[from_gelf(_GID, __GID)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     gid: Option<u64>,
 
-    #[from_gelf(_COMM)]
+    #[from_gelf(_COMM, __COMM)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     comm: Option<String>,
 
-    #[from_gelf(_EXE)]
+    #[from_gelf(_EXE, __EXE)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     exe: Option<String>,
 
-    #[from_gelf(_CMDLINE)]
+    #[from_gelf(_CMDLINE, __CMDLINE)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     cmdline: Option<String>,
 
-    #[from_gelf(_CAP_EFFECTIVE = "hex_to_uint")]
+    #[from_gelf(_CAP_EFFECTIVE = "hex_to_uint", __CAP_EFFECTIVE = "hex_to_uint")]
     #[toshi_type = "u64"]
     #[format = "hex"]
     #[serde(skip_serializing_if = "Option::is_none")]
     cap_effective: Option<u64>,
 
-    #[from_gelf(_AUDIT_SESSION)]
+    #[from_gelf(_AUDIT_SESSION, __AUDIT_SESSION)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_session: Option<u64>,
 
-    #[from_gelf(_AUDIT_LOGINUID)]
+    #[from_gelf(_AUDIT_LOGINUID, __AUDIT_LOGINUID)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     audit_loginuid: Option<u64>,
 
-    #[from_gelf(_SYSTEMD_CGROUP)]
+    #[from_gelf(_SYSTEMD_CGROUP, __SYSTEMD_CGROUP)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_cgroup: Option<String>,
 
-    #[from_gelf(_SYSTEMD_SLICE)]
+    #[from_gelf(_SYSTEMD_SLICE, __SYSTEMD_SLICE)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_slice: Option<String>,
 
-    #[from_gelf(_SYSTEMD_UNIT)]
+    #[from_gelf(_SYSTEMD_UNIT, __SYSTEMD_UNIT)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_unit: Option<String>,
 
-    #[from_gelf(_SYSTEMD_USER_UNIT)]
+    #[from_gelf(_SYSTEMD_USER_UNIT, __SYSTEMD_USER_UNIT)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_user_unit: Option<String>,
 
-    #[from_gelf(_SYSTEMD_USER_SLICE)]
+    #[from_gelf(_SYSTEMD_USER_SLICE, __SYSTEMD_USER_SLICE)]
     #[toshi_type = "text"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_user_slice: Option<String>,
 
-    #[from_gelf(_SYSTEMD_SESSION)]
+    #[from_gelf(_SYSTEMD_SESSION, __SYSTEMD_SESSION)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_session: Option<String>,
 
-    #[from_gelf(_SYSTEMD_OWNER_UID)]
+    #[from_gelf(_SYSTEMD_OWNER_UID, __SYSTEMD_OWNER_UID)]
     #[toshi_type = "u64"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_owner_uid: Option<u64>,
 
-    #[from_gelf(_SELINUX_CONTEXT)]
+    #[from_gelf(_SELINUX_CONTEXT, __SELINUX_CONTEXT)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     selinux_context: Option<String>,
 
-    #[from_gelf(_BOOT_ID)]
+    #[from_gelf(_BOOT_ID, __BOOT_ID)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     boot_id: Option<String>,
 
-    #[from_gelf(_MACHINE_ID)]
+    #[from_gelf(_MACHINE_ID, __MACHINE_ID)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     machine_id: Option<String>,
 
-    #[from_gelf(_SYSTEMD_INVOCATION_ID)]
+    #[from_gelf(_SYSTEMD_INVOCATION_ID, __SYSTEMD_INVOCATION_ID)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     systemd_invocation_id: Option<String>,
 
-    #[from_gelf(_TRANSPORT)]
+    #[from_gelf(_TRANSPORT, __TRANSPORT)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     transport: Option<String>,
 
-    #[from_gelf(_STREAM_ID)]
+    #[from_gelf(_STREAM_ID, __STREAM_ID)]
     #[toshi_type = "string"]
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_id: Option<String>,
