@@ -28,7 +28,7 @@ pub struct SyslogMessage {
     pub(crate) full_message: String,
 }
 
-const FACILITY_NAMES: [&'static str; 16] = [
+const FACILITY_NAMES: [&str; 16] = [
     "kern",     // #define LOG_KERN        (0<<3)  /* kernel messages */
     "user",     // #define LOG_USER        (1<<3)  /* random user-level messages */
     "mail",     // #define LOG_MAIL        (2<<3)  /* mail system */
@@ -183,7 +183,7 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
             priority: *opt_prio_fac.as_ref().map(|(prio, _)| prio).unwrap_or(&5u8),
             facility: opt_prio_fac
                 .map(|(_, fac)| fac)
-                .unwrap_or("user".to_string()),
+                .unwrap_or_else(|| "user".to_string()),
             source_timestamp: opt_ts.unwrap_or_else(|| {
                 let now = Local::now();
                 now.with_timezone(now.offset())
@@ -218,7 +218,7 @@ pub async fn run_recv_loop(
             Ok((size, source)) => match parse_syslog(&buf[0..size]) {
                 Ok((remaining, syslog_msg)) => {
                     syslog_pipe.send((source, syslog_msg)).await?;
-                    if remaining.len() > 0 {
+                    if !remaining.is_empty() {
                         warn!(
                             "Remaining data after parsing syslog message: {:?}",
                             remaining

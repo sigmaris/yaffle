@@ -2,6 +2,7 @@ use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::convert::TryInto;
+use std::iter::FromIterator;
 
 use horrorshow::Template;
 use hyper::http::{header, StatusCode};
@@ -80,7 +81,7 @@ fn search_route(
                 }
                 match response {
                     Ok(results) => {
-                        let hashmaps = results
+                        let hashmaps: Vec<_> = results
                             .get_docs()
                             .iter()
                             .map(|scored_doc| {
@@ -113,18 +114,18 @@ fn field_custom_sort(a: &&str, b: &&str) -> Ordering {
     }
 }
 
-fn fieldset<'a>(results: &Vec<HashMap<&'a str, Cow<str>>>) -> Vec<&'a str> {
+fn fieldset<'a>(results: &[HashMap<&'a str, Cow<str>>]) -> Vec<&'a str> {
     let mut field_set = HashSet::new();
     results.iter().fold(&mut field_set, |mut set, doc| {
         doc.keys().fold(&mut set, |inner_set, item| {
             if *item != "message" && *item != "full_message" {
-                inner_set.insert(item);
+                inner_set.insert(*item);
             }
             inner_set
         });
         set
     });
-    let mut fields: Vec<&str> = field_set.drain().map(|s| (*s)).collect();
+    let mut fields = Vec::from_iter(field_set);
     fields.sort_by(field_custom_sort);
     fields
 }

@@ -7,7 +7,6 @@ use bytes::{buf::ext::BufExt, Buf, Bytes};
 use flate2::bufread::{GzDecoder, ZlibDecoder};
 use log::{debug, info, trace, warn};
 use serde::{self, Deserialize};
-use serde_json;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::task;
@@ -131,18 +130,16 @@ fn parse_packet(
             trace!("Chunk {}: {} of {} chunks", id, seqno, count);
             if count < 2 {
                 warn!("Chunked packet with only {} chunks", count);
-            } else {
-                if let Some(mut complete) =
-                    assemble_chunked(partials, id, seqno, count, content, expiry_tx)
-                {
-                    let mut drainer = complete.drain(..);
-                    let mut chain: Box<dyn Buf> =
-                        Box::new(drainer.next().unwrap().chain(drainer.next().unwrap()));
-                    for item in drainer {
-                        chain = Box::new(chain.chain(item));
-                    }
-                    return parse_packet(partials, &mut chain, expiry_tx);
+            } else if let Some(mut complete) =
+                assemble_chunked(partials, id, seqno, count, content, expiry_tx)
+            {
+                let mut drainer = complete.drain(..);
+                let mut chain: Box<dyn Buf> =
+                    Box::new(drainer.next().unwrap().chain(drainer.next().unwrap()));
+                for item in drainer {
+                    chain = Box::new(chain.chain(item));
                 }
+                return parse_packet(partials, &mut chain, expiry_tx);
             }
         }
         PacketType::Uncompressed(content) => {

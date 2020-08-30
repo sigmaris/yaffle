@@ -34,7 +34,7 @@ fn syslog_accessor(ident: &Ident, field: &str) -> TokenStream {
 fn constructor_expr(
     dest_field: &Ident,
     source_ident: &Ident,
-    source_fields: &Vec<FieldValueConversion>,
+    source_fields: &[FieldValueConversion],
     syslog: bool,
 ) -> TokenStream {
     let mut expr = None;
