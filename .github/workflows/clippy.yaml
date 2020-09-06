@@ -15,7 +15,7 @@ jobs:
         repository: sigmaris/Toshi
         path: Toshi
     - name: Run clippy
-      uses: sigmaris/action-clippy@debian_image
+      uses: sigmaris/action-clippy@master
       with:
         workdir: yaffle
         level: warning
