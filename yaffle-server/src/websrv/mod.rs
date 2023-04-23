@@ -7,9 +7,9 @@ use std::iter::FromIterator;
 use horrorshow::Template;
 use hyper::http::{header, StatusCode};
 use serde::Deserialize;
-use tokio::net::TcpListener;
 use tokio::sync::oneshot;
-use toshi::{Client, HyperToshi, Query, Search};
+use tokio_stream::wrappers::TcpListenerStream;
+use toshi::{AsyncClient, HyperToshi, Query, Search};
 use warp::{reply, Filter};
 
 use crate::{query::parse_query, schema::Document, SharedSettings};
@@ -132,7 +132,7 @@ fn fieldset<'a>(results: &[HashMap<&'a str, Cow<str>>]) -> Vec<&'a str> {
 
 pub async fn run_http_server(
     settings: SharedSettings,
-    http_listener: &'static mut TcpListener,
+    http_listener: TcpListenerStream,
     shutdown_rx: oneshot::Receiver<()>,
 ) {
     let search_route = search_route(settings);

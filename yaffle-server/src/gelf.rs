@@ -81,10 +81,10 @@ fn assemble_chunked(
     expiry_tx: &Sender<u64>,
 ) -> Option<Vec<Bytes>> {
     let entry = partials.entry(id).or_insert_with(|| {
-        let mut tx2 = expiry_tx.clone();
+        let tx2 = expiry_tx.clone();
         task::spawn(async move {
             // In 5s, send a message via the channel to expire this entry
-            time::delay_for(Duration::from_secs(5)).await;
+            time::sleep(Duration::from_secs(5)).await;
             tx2.send(id).await.unwrap();
         });
         vec![None; count.into()]
@@ -175,8 +175,8 @@ fn parse_packet(
 }
 
 pub async fn run_recv_loop(
-    mut socket: UdpSocket,
-    mut gelf_pipe: Sender<(SocketAddr, GELFMessage)>,
+    socket: UdpSocket,
+    gelf_pipe: Sender<(SocketAddr, GELFMessage)>,
 ) -> Result<(), Box<dyn Error>> {
     let mut buf = [0; 65536];
     let mut partials: HashMap<u64, Vec<Option<Bytes>>> = HashMap::new();

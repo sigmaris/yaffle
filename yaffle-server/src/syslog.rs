@@ -117,11 +117,11 @@ fn rfc3164_timestamp(input: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
     );
     let ts_tuple = tuple((month, day, time));
     let naive_ts = map_res(ts_tuple, |(mon, d, naive_time)| {
-        NaiveDate::from_ymd_opt(Local::today().year(), mon.into(), d.into())
+        NaiveDate::from_ymd_opt(Local::now().year(), mon.into(), d.into())
             .map(|naive_date| NaiveDateTime::new(naive_date, naive_time))
             .ok_or(format!(
                 "Invalid date: year={}, month={}, day={}",
-                Local::today().year(),
+                Local::now().year(),
                 mon,
                 d
             ))
@@ -209,8 +209,8 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
 }
 
 pub async fn run_recv_loop(
-    mut socket: UdpSocket,
-    mut syslog_pipe: Sender<(SocketAddr, SyslogMessage)>,
+    socket: UdpSocket,
+    syslog_pipe: Sender<(SocketAddr, SyslogMessage)>,
 ) -> Result<(), Box<dyn Error>> {
     let mut buf = [0; 65536];
     loop {
@@ -256,7 +256,7 @@ mod tests {
         assert!(result.is_ok());
         let (remaining, ts) = result.unwrap();
         assert_eq!(remaining, b"");
-        assert_eq!(ts.year(), Local::today().year());
+        assert_eq!(ts.year(), Local::now().year());
         assert_eq!(ts.month(), 1);
         assert_eq!(ts.day(), 2);
         assert_eq!(ts.hour(), 12);
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(remaining, b"");
         assert_eq!(msg.priority, 6);
         assert_eq!(msg.facility, "cron");
-        assert_eq!(msg.source_timestamp.year(), Local::today().year());
+        assert_eq!(msg.source_timestamp.year(), Local::now().year());
         assert_eq!(msg.source_timestamp.month(), 8);
         assert_eq!(msg.source_timestamp.day(), 2);
         assert_eq!(msg.source_timestamp.hour(), 9);
@@ -294,7 +294,7 @@ mod tests {
         assert_eq!(remaining, b"");
         assert_eq!(msg.priority, 6);
         assert_eq!(msg.facility, "syslog");
-        assert_eq!(msg.source_timestamp.year(), Local::today().year());
+        assert_eq!(msg.source_timestamp.year(), Local::now().year());
         assert_eq!(msg.source_timestamp.month(), 8);
         assert_eq!(msg.source_timestamp.day(), 1);
         assert_eq!(msg.source_timestamp.hour(), 19);
@@ -314,9 +314,9 @@ mod tests {
         assert_eq!(remaining, b"");
         assert_eq!(msg.priority, 7);
         assert_eq!(msg.facility, "kern");
-        assert_eq!(msg.source_timestamp.year(), Local::today().year());
-        assert_eq!(msg.source_timestamp.month(), Local::today().month());
-        assert_eq!(msg.source_timestamp.day(), Local::today().day());
+        assert_eq!(msg.source_timestamp.year(), Local::now().year());
+        assert_eq!(msg.source_timestamp.month(), Local::now().month());
+        assert_eq!(msg.source_timestamp.day(), Local::now().day());
         assert_eq!(msg.hostname, None);
         assert_eq!(msg.identifier, None);
         assert_eq!(msg.pid, None);
@@ -334,9 +334,9 @@ mod tests {
         assert_eq!(remaining, b"");
         assert_eq!(msg.priority, 7);
         assert_eq!(msg.facility, "kern");
-        assert_eq!(msg.source_timestamp.year(), Local::today().year());
-        assert_eq!(msg.source_timestamp.month(), Local::today().month());
-        assert_eq!(msg.source_timestamp.day(), Local::today().day());
+        assert_eq!(msg.source_timestamp.year(), Local::now().year());
+        assert_eq!(msg.source_timestamp.month(), Local::now().month());
+        assert_eq!(msg.source_timestamp.day(), Local::now().day());
         assert_eq!(msg.hostname, None);
         assert_eq!(msg.identifier, None);
         assert_eq!(msg.pid, None);

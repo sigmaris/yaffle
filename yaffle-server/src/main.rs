@@ -3,11 +3,10 @@ use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tokio::stream::StreamExt;
+use tokio_stream::wrappers::ReceiverStream;
 
 use futures::future::join_all;
 use futures::stream::FuturesOrdered;
-use futures_batch::ChunksTimeoutStreamExt;
 use lazy_static::lazy_static;
 use listenfd::ListenFd;
 use log::{debug, warn};
@@ -18,8 +17,9 @@ use tantivy::space_usage::SearcherSpaceUsage;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
-use tokio::time::delay_for;
-use toshi::{Client, HyperToshi, IndexOptions};
+use tokio::time::sleep;
+use tokio_stream::StreamExt;
+use toshi::{AsyncClient, HyperToshi, IndexOptions};
 
 mod gelf;
 mod query;
@@ -48,7 +48,7 @@ impl Settings {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     env_logger::init();
-    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
 
     let toshi_url = "http://localhost:8080".to_string();
     let max_docs = 1_000_000;
@@ -88,20 +88,19 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     // Create HTTP listener and then leak it for the remainder of the program's lifetime
-    let http_listener: &'static mut TcpListener = Box::leak(Box::new(
-        if let Some(std_sock) = listenfd.take_tcp_listener(2).ok().flatten() {
-            debug!("Using passed HTTP socket {:?}", std_sock);
-            rt.block_on(async { TcpListener::from_std(std_sock) })?
-        } else {
-            debug!("Binding to [::]:8088 for HTTP");
-            rt.block_on(TcpListener::bind("[::]:8088"))?
-        },
-    ));
+    let http_listener = if let Some(std_sock) = listenfd.take_tcp_listener(2).ok().flatten() {
+        debug!("Using passed HTTP socket {:?}", std_sock);
+        rt.block_on(async { TcpListener::from_std(std_sock) })?
+    } else {
+        debug!("Binding to [::]:8088 for HTTP");
+        rt.block_on(TcpListener::bind("[::]:8088"))?
+    };
+    let http_stream = tokio_stream::wrappers::TcpListenerStream::new(http_listener);
 
     rt.spawn(index_manager(settings.clone()));
     rt.spawn(websrv::run_http_server(
         settings.clone(),
-        http_listener,
+        http_stream,
         shutdown_rx,
     ));
     rt.block_on(async { async_dual_main(settings, gelf_rx, syslog_rx).await.unwrap() });
@@ -158,7 +157,7 @@ async fn check_index(
 
 async fn index_manager(shared_settings: SharedSettings) {
     loop {
-        delay_for(Duration::from_secs(60)).await;
+        sleep(Duration::from_secs(60)).await;
         let (index, toshi_url, max_docs) = {
             let settings = shared_settings.lock().unwrap();
             (
@@ -235,7 +234,7 @@ async fn find_index(toshi_url: &str, max_docs: u32) -> Result<u32, Box<dyn Error
     let mut futures = FuturesOrdered::new();
     for coarse in (0..20).rev() {
         debug!("Pushing check for yaffle_{}", coarse * 10);
-        futures.push(check_index(&c, coarse * 10, max_docs));
+        futures.push_back(check_index(&c, coarse * 10, max_docs));
     }
     'outer: for fine in 1..200 {
         for coarse in (0..20).rev() {
@@ -253,7 +252,7 @@ async fn find_index(toshi_url: &str, max_docs: u32) -> Result<u32, Box<dyn Error
             }
             if fine < 10 {
                 debug!("Pushing check for yaffle_{}", (coarse * 10) + fine);
-                futures.push(check_index(&c, (coarse * 10) + fine, max_docs));
+                futures.push_back(check_index(&c, (coarse * 10) + fine, max_docs));
             }
         }
     }
@@ -277,8 +276,8 @@ async fn async_dual_main(
     syslog_rx: mpsc::Receiver<(SocketAddr, syslog::SyslogMessage)>,
 ) -> Result<(), Box<dyn Error>> {
     // Merge the two streams of incoming messages
-    let gelf_stream = gelf_rx.map(|(src, x)| (src, Incoming::Gelf(x)));
-    let syslog_stream = syslog_rx.map(|(src, y)| (src, Incoming::Syslog(y)));
+    let gelf_stream = ReceiverStream::new(gelf_rx).map(|(src, x)| (src, Incoming::Gelf(x)));
+    let syslog_stream = ReceiverStream::new(syslog_rx).map(|(src, y)| (src, Incoming::Syslog(y)));
     let merged = gelf_stream.merge(syslog_stream);
 
     let client = {
@@ -292,7 +291,7 @@ async fn async_dual_main(
     let commit_every = Duration::from_secs(COMMIT_EVERY_SECS.into());
 
     // Process and submit messages in batch
-    let mut chunks = merged.chunks_timeout(BATCH_SIZE, commit_every);
+    let mut chunks = Box::pin(merged.chunks_timeout(BATCH_SIZE, commit_every));
     while let Some(mut chunk) = chunks.next().await {
         debug!("Processing a batch of {} message(s)", chunk.len());
         let index_name = &settings.lock().unwrap().index_name();
@@ -313,7 +312,7 @@ async fn async_dual_main(
                     let src_ip = src.ip();
                     Some(async move {
                         doc.do_reverse_dns(src_ip).await;
-                        c.add_document(index_name, Some(IndexOptions { commit }), doc)
+                        c.add_document(index_name, doc, Some(IndexOptions { commit }))
                             .await
                     })
                 }
@@ -334,11 +333,7 @@ async fn async_dual_main(
                     if !response.status().is_success() {
                         let response_msg =
                             format!("Error response from add_document: {:?}", response);
-                        match response
-                            .into_body()
-                            .collect::<Result<bytes::Bytes, _>>()
-                            .await
-                        {
+                        match hyper::body::to_bytes(response.into_body()).await {
                             Ok(bytes) => warn!(
                                 "{}: {}",
                                 response_msg,
