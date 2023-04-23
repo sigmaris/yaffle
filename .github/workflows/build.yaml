@@ -10,13 +10,13 @@ jobs:
     runs-on: ubuntu-20.04
     steps:
     - name: Checkout yaffle
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
         path: yaffle
     - name: Checkout Toshi
-      uses: actions/checkout@v2
+      uses: actions/checkout@v3
       with:
-        repository: sigmaris/Toshi
+        repository: toshi-search/Toshi
         path: Toshi
     - run: cd "${GITHUB_WORKSPACE}/yaffle" && cargo test
     - run: cd "${GITHUB_WORKSPACE}/yaffle" && cargo build
