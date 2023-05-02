@@ -7,7 +7,7 @@ use nom::character::complete::{digit1, space1};
 use nom::combinator::{all_consuming, map, map_res, opt};
 use nom::multi::{fold_many0, separated_list1};
 use nom::sequence::{delimited, pair, preceded, separated_pair, terminated, tuple};
-use nom::IResult;
+use nom::{IResult, Parser};
 use serde::Serialize;
 use toshi::{
     BoolQuery, ExactTerm, FuzzyQuery, PhraseQuery, Query, RangeQuery, RegexQuery, TermPair,
@@ -32,7 +32,10 @@ fn identifier(input: &str) -> IResult<&str, &str> {
 }
 
 fn basic_term(input: &str) -> IResult<&str, &str> {
-    take_while1(|ch: char| ch.is_alphanumeric() || ch == '_')(input)
+    let parsed = nom::combinator::not(tag("NOT"))
+        .and(take_while1(|ch: char| ch.is_alphanumeric() || ch == '_'))
+        .parse(input)?;
+    Ok((parsed.0, parsed.1 .1))
 }
 
 fn quoted(input: &str) -> IResult<&str, &str> {
@@ -100,16 +103,19 @@ fn num_range_bound(input: &str) -> IResult<&str, Bound<i32>> {
     )(input)
 }
 
+fn fuzzy_basic_term(input: &str) -> IResult<&str, (Option<&str>, &str)> {
+    preceded(
+        tag("~"),
+        tuple((opt(terminated(digit1, tag("~"))), basic_term)),
+    )(input)
+}
+
 fn fuzzy_term_q(input: &str) -> IResult<&str, Query> {
     map_res(
-        separated_pair(
-            identifier,
-            tag(":"),
-            preceded(
-                tag("~"),
-                tuple((opt(terminated(digit1, tag("~"))), basic_term)),
-            ),
-        ),
+        alt((
+            separated_pair(identifier, tag(":"), fuzzy_basic_term),
+            map(fuzzy_basic_term, |term| ("message", term)),
+        )),
         |(field_name, (distance_opt, term))| {
             let distance = if let Some(dist_str) = distance_opt {
                 u8::from_str_radix(dist_str, 10)?
@@ -130,14 +136,20 @@ fn fuzzy_term_q(input: &str) -> IResult<&str, Query> {
 
 fn exact_term_q(input: &str) -> IResult<&str, Query> {
     map(
-        separated_pair(identifier, tag(":"), basic_term),
+        alt((
+            separated_pair(identifier, tag(":"), basic_term),
+            map(basic_term, |term| ("message", term)),
+        )),
         |(field_name, term)| Query::Exact(ExactTerm::with_term(field_name, term)),
     )(input)
 }
 
 fn phrase_q(input: &str) -> IResult<&str, Query> {
     map(
-        separated_pair(identifier, tag(":"), quoted),
+        alt((
+            separated_pair(identifier, tag(":"), quoted),
+            map(quoted, |phrase| ("message", phrase)),
+        )),
         |(field_name, phrase_str)| {
             let words: Vec<String> = phrase_str.split_whitespace().map(String::from).collect();
             Query::Phrase(PhraseQuery::with_phrase(
@@ -150,7 +162,10 @@ fn phrase_q(input: &str) -> IResult<&str, Query> {
 
 fn regex_q(input: &str) -> IResult<&str, Query> {
     map(
-        separated_pair(identifier, tag(":"), regex),
+        alt((
+            separated_pair(identifier, tag(":"), regex),
+            map(regex, |regex_val| ("message", regex_val)),
+        )),
         |(field_name, regex_string)| {
             Query::Regex(RegexQuery::from_str(field_name.to_string(), regex_string))
         },
@@ -243,7 +258,7 @@ fn disjunction(input: &str) -> IResult<&str, QueryTree> {
 
     fold_many0(
         preceded(tuple((space1, tag("OR"), space1)), simple),
-        init,
+        move || init.clone(),
         |left, right| match left {
             QueryTree::Or(mut xs) => {
                 xs.push(right);
@@ -260,7 +275,7 @@ fn expr(input: &str) -> IResult<&str, QueryTree> {
 
     fold_many0(
         preceded(tuple((space1, tag("AND"), space1)), disjunction),
-        init,
+        move || init.clone(),
         |left, right| match left {
             QueryTree::And(mut xs) => {
                 xs.push(right);
@@ -400,6 +415,30 @@ mod tests {
         } else {
             panic!("Expected simple query tree, got: {:?}", query)
         }
+    }
+
+    #[test]
+    fn test_string_alone() {
+        let result = parse_query("some_term", None);
+        assert!(result.is_ok());
+        let (remaining, query) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(
+            serde_json::to_value(&query).unwrap(),
+            serde_json::json!({"term":{"message":"some_term"}})
+        );
+    }
+
+    #[test]
+    fn test_quoted_alone() {
+        let result = parse_query("\"quoted phrase\"", None);
+        assert!(result.is_ok());
+        let (remaining, query) = result.unwrap();
+        assert_eq!(remaining, "");
+        assert_eq!(
+            serde_json::to_value(&query).unwrap(),
+            serde_json::json!({"phrase":{"message":{"terms": ["quoted", "phrase"]}}})
+        );
     }
 
     #[test]
