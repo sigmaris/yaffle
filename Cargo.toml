@@ -1,6 +1,4 @@
 [workspace]
 
-members = [
-    "yaffle-macros",
-    "yaffle-server"
-]
+members = ["yaffle-macros", "yaffle-server"]
+exclude = ["Toshi"]

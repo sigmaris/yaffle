@@ -23,7 +23,7 @@ serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 tantivy = "^0.19"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-toshi = { path = "../../Toshi/toshi-client", default-features = false, features = [
+toshi = { path = "../Toshi/toshi-client", default-features = false, features = [
     "hyper_client",
 ] }
 warp = "0.3"

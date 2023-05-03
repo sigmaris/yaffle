@@ -1,0 +1,3 @@
+[submodule "Toshi"]
+	path = Toshi
+	url = https://github.com/toshi-search/Toshi.git
