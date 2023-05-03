@@ -1,0 +1,9 @@
+services:
+  yaffle:
+    image: ghcr.io/sigmaris/yaffle:latest
+    init: true
+  toshi:
+    image: ghcr.io/sigmaris/toshi:latest
+    init: true
+    depends_on:
+      - yaffle # TODO: retry connection in yaffle

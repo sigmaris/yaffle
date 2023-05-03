@@ -12,4 +12,5 @@ efi_firmware_paths = {
   "arm64" = {
     "code" = "/usr/local/share/qemu/edk2-aarch64-code.fd"
     "vars" = "/usr/local/share/qemu/edk2-arm-vars.fd"
+  }
 }

@@ -51,6 +51,10 @@ variable "efi_firmware_paths" {
   type = map(map(string))
 }
 
+variable "container_tag" {
+  type = string
+}
+
 data "external-raw" "host_uname_kernel" {
   program = ["uname", "-s"]
 }
@@ -59,9 +63,24 @@ data "external-raw" "host_uname_machine" {
   program = ["uname", "-m"]
 }
 
-source "docker" "bookworm" {
+source "docker" "toshi" {
   image  = "debian:bookworm-${var.debian_img_datestamp}"
   commit = true
+  changes = [
+    "USER toshi",
+    "ENTRYPOINT cd /opt/toshi; exec /opt/toshi/toshi -c config/toshi_config.toml",
+    "EXPOSE 8080",
+  ]
+}
+
+source "docker" "yaffle" {
+  image  = "debian:bookworm-${var.debian_img_datestamp}"
+  commit = true
+  changes = [
+    "USER yaffle",
+    "ENTRYPOINT cd /opt/yaffle; exec /opt/yaffle/yaffle-server",
+    "EXPOSE 8088",
+  ]
 }
 
 data "sshkey" "install" {
@@ -81,6 +100,10 @@ locals {
   qemu_cpu      = local.cross_compile ? "max" : "host"
   qemu_binary   = var.deb_arch == "amd64" ? "qemu-system-x86_64" : "qemu-system-aarch64"
   qemu_machine  = var.deb_arch == "amd64" ? "q35" : "virt"
+  rust_target = lookup({
+    "arm64" = "aarch64-unknown-linux-gnu"
+    "amd64" = "x86_64-unknown-linux-gnu"
+  }, var.deb_arch, "unknown")
 }
 
 source "qemu" "bookworm" {
@@ -114,14 +137,51 @@ source "qemu" "bookworm" {
 }
 
 build {
-  name = "qemu-image"
+  name = "toshi-server"
   sources = [
-    "source.qemu.bookworm"
+    "source.docker.toshi"
   ]
   provisioner "shell" {
     inline = [
-      "echo Adding file to image",
-      "echo 'I was here' > example.txt",
+      "useradd --system --home-dir /opt/toshi --create-home --shell /sbin/nologin --user-group --comment 'Toshi Search' toshi",
+      "mkdir -p /opt/toshi/config",
+      "mkdir -p /opt/toshi/data",
+      "chown toshi:toshi /opt/toshi/data"
     ]
+  }
+  provisioner "file" {
+    source      = "${path.root}/../Toshi/target/${local.rust_target}/release/toshi"
+    destination = "/opt/toshi/toshi"
+  }
+  provisioner "file" {
+    sources = [
+      "${path.root}/logging.toml",
+      "${path.root}/toshi_config.toml",
+    ]
+    destination = "/opt/toshi/config/"
+  }
+  post-processor "docker-tag" {
+    repository = "ghcr.io/sigmaris/toshi"
+    tags = ["latest", var.container_tag]
+  }
+}
+
+build {
+  name = "yaffle-server"
+  sources = [
+    "source.docker.yaffle"
+  ]
+  provisioner "shell" {
+    inline = [
+      "useradd --system --home-dir /opt/yaffle --create-home --shell /sbin/nologin --user-group --comment 'Yaffle Server' yaffle",
+    ]
+  }
+  provisioner "file" {
+    source      = "${path.root}/../target/${local.rust_target}/release/yaffle-server"
+    destination = "/opt/yaffle/yaffle-server"
+  }
+  post-processor "docker-tag" {
+    repository = "ghcr.io/sigmaris/yaffle"
+    tags = ["latest", var.container_tag]
   }
 }
