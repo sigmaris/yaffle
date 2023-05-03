@@ -1,38 +1,45 @@
-use std::collections::HashMap;
-use std::error::Error;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
-use tokio_stream::wrappers::ReceiverStream;
-
-use futures::future::join_all;
-use futures::stream::FuturesOrdered;
-use lazy_static::lazy_static;
-use listenfd::ListenFd;
-use log::{debug, warn};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use tantivy::schema::Schema;
-use tantivy::space_usage::SearcherSpaceUsage;
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::mpsc;
-use tokio::sync::oneshot;
-use tokio::time::sleep;
-use tokio_stream::StreamExt;
-use toshi::{AsyncClient, HyperToshi, IndexOptions};
-
 mod gelf;
 mod query;
 mod schema;
 mod syslog;
 mod websrv;
 
-use schema::{Document, YaffleSchema};
+use crate::schema::{Document, YaffleSchema};
+use clap::Parser;
+use futures::future::join_all;
+use lazy_static::lazy_static;
+use listenfd::ListenFd;
+use log::{debug, warn};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::HashMap;
+use std::error::Error;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+use tantivy::schema::Schema;
+use tantivy::space_usage::SearcherSpaceUsage;
+use tokio::net::{TcpListener, UdpSocket};
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::sleep;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::StreamExt;
+use toshi::{AsyncClient, HyperToshi, IndexOptions};
 
 type JsonOwnedKeysMap = HashMap<String, Value>;
 type DefaultHyperToshi =
     HyperToshi<hyper::client::HttpConnector<hyper::client::connect::dns::GaiResolver>>;
 type SharedSettings = Arc<Mutex<Settings>>;
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(
+        short = 't',
+        default_value = "http://localhost:8080",
+        env = "TOSHI_URL"
+    )]
+    toshi_url: String,
+}
 
 pub struct Settings {
     pub toshi_url: String,
@@ -48,9 +55,9 @@ impl Settings {
 
 fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     env_logger::init();
+    let Args { toshi_url } = Args::parse();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let toshi_url = "http://localhost:8080".to_string();
     let max_docs = 1_000_000;
     let index = rt.block_on(find_index(&toshi_url, max_docs))?;
     debug!("Found index name yaffle_{}", index);
@@ -66,6 +73,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (gelf_tx, gelf_rx) = mpsc::channel(10);
     let gelf_sock = if let Some(std_sock) = listenfd.take_udp_socket(0).ok().flatten() {
         debug!("Using passed GELF UDP socket {:?}", std_sock);
+        std_sock.set_nonblocking(true)?;
         rt.block_on(async { UdpSocket::from_std(std_sock) })?
     } else {
         debug!("Binding to [::]:12201 for GELF UDP");
@@ -78,6 +86,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let (syslog_tx, syslog_rx) = mpsc::channel(10);
     let syslog_sock = if let Some(std_sock) = listenfd.take_udp_socket(1).ok().flatten() {
         debug!("Using passed Syslog UDP socket {:?}", std_sock);
+        std_sock.set_nonblocking(true)?;
         rt.block_on(async { UdpSocket::from_std(std_sock) })?
     } else {
         debug!("Binding to [::]:10514 for Syslog UDP");
@@ -90,6 +99,7 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     // Create HTTP listener and then leak it for the remainder of the program's lifetime
     let http_listener = if let Some(std_sock) = listenfd.take_tcp_listener(2).ok().flatten() {
         debug!("Using passed HTTP socket {:?}", std_sock);
+        std_sock.set_nonblocking(true)?;
         rt.block_on(async { TcpListener::from_std(std_sock) })?
     } else {
         debug!("Binding to [::]:8088 for HTTP");
@@ -230,30 +240,13 @@ async fn find_first_open_index(
 async fn find_index(toshi_url: &str, max_docs: u32) -> Result<u32, Box<dyn Error + Send + Sync>> {
     let client = hyper::Client::default();
     let c = HyperToshi::with_client(toshi_url, client);
-    // TODO: avoid iterating when Toshi has a "list all indexes" method
-    let mut futures = FuturesOrdered::new();
-    for coarse in (0..20).rev() {
-        debug!("Pushing check for yaffle_{}", coarse * 10);
-        futures.push_back(check_index(&c, coarse * 10, max_docs));
-    }
-    'outer: for fine in 1..200 {
-        for coarse in (0..20).rev() {
-            if let Some(result) = futures.next().await {
-                let (exists, _, index) = result?;
-                if exists {
-                    debug!("Does yaffle_{} exist? YES", index);
-                    return Ok(find_first_open_index(&c, index, max_docs).await?);
-                } else {
-                    debug!("Does yaffle_{} exist? NO", index);
-                }
-            } else {
-                // futures stream is empty, break
-                break 'outer;
-            }
-            if fine < 10 {
-                debug!("Pushing check for yaffle_{}", (coarse * 10) + fine);
-                futures.push_back(check_index(&c, (coarse * 10) + fine, max_docs));
-            }
+    let indices: Vec<String> =
+        serde_json::from_slice(&hyper::body::to_bytes(c.list().await?.into_body()).await?)?;
+
+    for index_name in indices {
+        if index_name.starts_with("yaffle_") {
+            let index = u32::from_str_radix(index_name.strip_prefix("yaffle_").unwrap(), 10)?;
+            return Ok(find_first_open_index(&c, index, max_docs).await?);
         }
     }
     debug!("No yaffle_* indexes at all found, creating new index yaffle_0...");
