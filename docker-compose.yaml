@@ -2,8 +2,10 @@ services:
   yaffle:
     image: ghcr.io/sigmaris/yaffle:latest
     init: true
+    environment:
+      - TOSHI_URL=http://toshi:8080
   toshi:
     image: ghcr.io/sigmaris/toshi:latest
     init: true
-    depends_on:
-      - yaffle # TODO: retry connection in yaffle
+    ports:
+      - "8080:8080/tcp"
