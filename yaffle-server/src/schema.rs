@@ -51,7 +51,9 @@ pub(crate) trait YaffleSchema {
         if let Value::String(ref s) = val {
             Ok(DateTime::parse_from_rfc3339(s.trim())
                 .map(|dt| dt.timestamp_nanos() / 1000)
-                .or_else(|_e| DateTime::parse_from_rfc2822(s.trim()).map(|dt| dt.timestamp_nanos() / 1000))
+                .or_else(|_e| {
+                    DateTime::parse_from_rfc2822(s.trim()).map(|dt| dt.timestamp_nanos() / 1000)
+                })
                 .or_else(|_e| {
                     let now_s = format!("{} {}", Local::now().format("%Y"), s.trim());
                     NaiveDateTime::parse_from_str(&now_s, "%Y %b %e %T")
@@ -65,7 +67,11 @@ pub(crate) trait YaffleSchema {
 
 #[derive(Clone, Debug, Serialize, Deserialize, YaffleSchema)]
 pub(crate) struct Document {
-    #[from_gelf(timestamp = "float_sec_to_usec", _SOURCE_REALTIME_TIMESTAMP, __SOURCE_REALTIME_TIMESTAMP)]
+    #[from_gelf(
+        timestamp = "float_sec_to_usec",
+        _SOURCE_REALTIME_TIMESTAMP,
+        __SOURCE_REALTIME_TIMESTAMP
+    )]
     #[from_syslog(source_timestamp = "datetime_to_usec")]
     #[toshi_type = "timestamp"]
     source_timestamp: Option<u64>,
@@ -381,6 +387,7 @@ pub(crate) struct Document {
     #[toshi_type = "timestamp"]
     #[serde(skip_serializing_if = "Option::is_none")]
     recv_mt_timestamp: Option<u64>,
+    // TODO: The above recv_mt_timestamp should be #[toshi_type = "u64"]
 }
 
 impl Document {
