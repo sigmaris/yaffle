@@ -8,6 +8,7 @@ use tantivy::schema::Schema;
 use tokio::task;
 
 use crate::gelf::GELFMessage;
+use crate::quickwit::FieldMapping;
 use crate::syslog::SyslogMessage;
 use yaffle_macros::YaffleSchema;
 
@@ -21,6 +22,8 @@ pub(crate) trait YaffleSchema {
         Self: Sized;
 
     fn tantivy_schema() -> Schema;
+
+    fn quickwit_mapping() -> Vec<FieldMapping>;
 
     fn convert_datetime_to_usec(dt: DateTime<FixedOffset>) -> u64 {
         dt.timestamp_nanos() as u64 / 1000u64
@@ -409,5 +412,16 @@ impl Document {
                 .as_ref()
                 .map(|msg| !msg.is_empty())
                 .unwrap_or(false)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Document, YaffleSchema};
+
+    #[test]
+    fn test_tantivy_schema() {
+        let s = Document::quickwit_mapping();
+        println!("{}", serde_json::to_string_pretty(&s).unwrap());
     }
 }

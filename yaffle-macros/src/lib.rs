@@ -133,6 +133,7 @@ enum TantivyType {
     U64,
     I64,
     Timestamp,
+    JsonObject,
 }
 
 impl TantivyType {
@@ -272,13 +273,62 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
             )
         })
         .collect();
+
     let schema_builder_stmts: Vec<TokenStream> = tantivy_fields.iter().map(|(field, tantivy_type)| match *tantivy_type {
         TantivyType::String => quote!{ schema_builder.add_text_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::STRING) },
         TantivyType::Text => quote!{ schema_builder.add_text_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::TEXT) },
         TantivyType::U64 => quote!{ schema_builder.add_u64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
         TantivyType::I64 => quote!{ schema_builder.add_i64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
-        TantivyType::Timestamp => quote!{ schema_builder.add_u64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED | ::tantivy::schema::FAST) },
+        TantivyType::Timestamp => quote!{ schema_builder.add_date_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED | ::tantivy::schema::FAST) },
+        TantivyType::JsonObject => quote!{ schema_builder.add_json_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
     }).collect();
+
+    let quickwit_document_exprs: Vec<TokenStream> = tantivy_fields
+        .iter()
+        .map(|(field, tantivy_type)| match *tantivy_type {
+            TantivyType::String => {
+                quote! { crate::quickwit::FieldMapping {
+                    name: #field.to_string(),
+                    type_: "text".to_string(),
+                    tokenizer: Some(crate::quickwit::Tokenizer::Raw),
+                    ..Default::default()
+                } }
+            }
+            TantivyType::Text => quote! { crate::quickwit::FieldMapping {
+                name: #field.to_string(),
+                type_: "text".to_string(),
+                record: Some(crate::quickwit::RecordOption::Position),
+                ..Default::default()
+            } },
+            TantivyType::U64 => quote! { crate::quickwit::FieldMapping {
+                name: #field.to_string(),
+                type_: "u64".to_string(),
+                ..Default::default()
+            } },
+            TantivyType::I64 => quote! { crate::quickwit::FieldMapping {
+                name: #field.to_string(),
+                type_: "i64".to_string(),
+                ..Default::default()
+            } },
+            TantivyType::Timestamp => {
+                quote! { crate::quickwit::FieldMapping {
+                    name: #field.to_string(),
+                    type_: "datetime".to_string(),
+                    input_formats: vec!["unix_timestamp".to_string()],
+                    fast: true,
+                    precision: Some(crate::quickwit::DatePrecision::Microseconds),
+                    ..Default::default()
+                } }
+            }
+            TantivyType::JsonObject => {
+                quote! { crate::quickwit::FieldMapping {
+                    name: #field.to_string(),
+                    type_: "json",
+                    ..Default::default()
+                } }
+            }
+        })
+        .collect();
 
     // Statements to convert document to a map of fieldname->str for display
     let to_display_stmts: Vec<TokenStream> = tantivy_fields.iter().map(|(field, tantivy_type)| {
@@ -305,7 +355,8 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
                 .single()
                 .map(|dt| dt.to_string())
                 .unwrap_or("".to_string()).into()
-            }
+            },
+            TantivyType::JsonObject => quote!{ format!("{:?}", value).into() },
         };
         let field_ident = Ident::new(field, Span::call_site());
         quote! {
@@ -343,6 +394,12 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
                 let mut schema_builder = ::tantivy::schema::SchemaBuilder::default();
                 #( #schema_builder_stmts; )*
                 schema_builder.build()
+            }
+
+            fn quickwit_mapping() -> std::vec::Vec<crate::quickwit::FieldMapping> {
+                vec![
+                    #( #quickwit_document_exprs, )*
+                ]
             }
         }
     };

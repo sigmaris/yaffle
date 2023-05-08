@@ -1,5 +1,6 @@
 mod gelf;
 mod query;
+mod quickwit;
 mod schema;
 mod syslog;
 mod websrv;
