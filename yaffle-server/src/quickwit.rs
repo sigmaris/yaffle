@@ -1,4 +1,6 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+
+use crate::schema::Document;
 
 #[derive(Serialize, Debug)]
 pub(crate) enum Tokenizer {
@@ -109,4 +111,32 @@ pub(crate) struct DocumentMapping {
     pub(crate) store_source: bool,
     #[serde(skip_serializing_if = "String::is_empty")]
     pub(crate) timestamp_field: String,
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct RetentionSettings {
+    pub(crate) period: String,
+    pub(crate) schedule: String,
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct SearchSettings {
+    pub(crate) default_search_fields: Vec<String>,
+}
+
+#[derive(Serialize, Debug)]
+pub(crate) struct IndexCreateRequest {
+    pub(crate) doc_mapping: DocumentMapping,
+    pub(crate) index_id: String,
+    pub(crate) retention: RetentionSettings,
+    pub(crate) search_settings: SearchSettings,
+    pub(crate) version: String,
+}
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct SearchResults {
+    pub(crate) elapsed_time_micros: u64,
+    pub(crate) errors: Vec<String>,
+    pub(crate) hits: Vec<Document>,
+    pub(crate) num_hits: u64,
 }

@@ -133,6 +133,7 @@ enum TantivyType {
     U64,
     I64,
     Timestamp,
+    FastTimestamp,
     JsonObject,
 }
 
@@ -144,6 +145,7 @@ impl TantivyType {
             "u64" => Some(Self::U64),
             "i64" => Some(Self::I64),
             "timestamp" => Some(Self::Timestamp),
+            "fast_timestamp" => Some(Self::FastTimestamp),
             _ => None,
         }
     }
@@ -191,7 +193,7 @@ fn process_inner_attr(inner: &NestedMeta) -> Option<FieldValueConversion> {
     }
 }
 
-#[proc_macro_derive(YaffleSchema, attributes(from_gelf, from_syslog, toshi_type, format))]
+#[proc_macro_derive(YaffleSchema, attributes(from_gelf, from_syslog, storage_type, format))]
 pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let input_span = input.span();
@@ -225,8 +227,9 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
                             path,
                             lit: Lit::Str(typename),
                             ..
-                        })) if path.is_ident("toshi_type") => tantivy_fields.push((
+                        })) if path.is_ident("storage_type") => tantivy_fields.push((
                             field.ident.as_ref().unwrap().to_string(),
+                            // TODO detect if it's an Option
                             TantivyType::from_attribute(&typename.value()).unwrap(),
                         )),
                         Ok(Meta::NameValue(MetaNameValue {
@@ -279,7 +282,8 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
         TantivyType::Text => quote!{ schema_builder.add_text_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::TEXT) },
         TantivyType::U64 => quote!{ schema_builder.add_u64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
         TantivyType::I64 => quote!{ schema_builder.add_i64_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
-        TantivyType::Timestamp => quote!{ schema_builder.add_date_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED | ::tantivy::schema::FAST) },
+        TantivyType::Timestamp => quote!{ schema_builder.add_date_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
+        TantivyType::FastTimestamp => quote!{ schema_builder.add_date_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED | ::tantivy::schema::FAST) },
         TantivyType::JsonObject => quote!{ schema_builder.add_json_field(#field, ::tantivy::schema::STORED | ::tantivy::schema::INDEXED) },
     }).collect();
 
@@ -311,6 +315,16 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
                 ..Default::default()
             } },
             TantivyType::Timestamp => {
+                quote! { crate::quickwit::FieldMapping {
+                    name: #field.to_string(),
+                    type_: "datetime".to_string(),
+                    input_formats: vec!["unix_timestamp".to_string()],
+                    fast: false,
+                    precision: Some(crate::quickwit::DatePrecision::Microseconds),
+                    ..Default::default()
+                } }
+            }
+            TantivyType::FastTimestamp => {
                 quote! { crate::quickwit::FieldMapping {
                     name: #field.to_string(),
                     type_: "datetime".to_string(),
@@ -351,7 +365,7 @@ pub fn derive_yaffle_schema(input: proc_macro::TokenStream) -> proc_macro::Token
                 Some(FormatOption::Hex) => quote!{ format!("0x{:x}", value).into() },
                 None => quote!{ value.to_string().into() },
             },
-            TantivyType::Timestamp => quote!{ ::chrono::offset::Utc.timestamp_opt((value / 1_000_000) as i64, ((value % 1_000_000) * 1000) as u32)
+            TantivyType::Timestamp | TantivyType::FastTimestamp => quote!{ ::chrono::offset::Utc.timestamp_opt((value / 1_000_000) as i64, ((value % 1_000_000) * 1000) as u32)
                 .single()
                 .map(|dt| dt.to_string())
                 .unwrap_or("".to_string()).into()

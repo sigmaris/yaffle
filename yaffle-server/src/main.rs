@@ -1,71 +1,90 @@
 mod gelf;
-mod query;
 mod quickwit;
 mod schema;
 mod syslog;
 mod websrv;
 
+use crate::quickwit::{DocumentMapping, RetentionSettings, SearchSettings};
 use crate::schema::{Document, YaffleSchema};
 use clap::Parser;
-use futures::future::join_all;
+use hyper::client::HttpConnector;
+use hyper::http::uri::InvalidUri;
+use hyper::{Body, Client, Request, StatusCode, Uri};
 use lazy_static::lazy_static;
 use listenfd::ListenFd;
-use log::{debug, warn};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::error::Error;
+use log::{debug, error, warn};
+use nom::AsBytes;
+use std::io::Write;
 use std::net::SocketAddr;
+use std::str::FromStr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tantivy::schema::Schema;
-use tantivy::space_usage::SearcherSpaceUsage;
+use thiserror::Error;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::sleep;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use toshi::{AsyncClient, HyperToshi, IndexOptions};
+use url::ParseError;
 
-type JsonOwnedKeysMap = HashMap<String, Value>;
-type DefaultHyperToshi =
-    HyperToshi<hyper::client::HttpConnector<hyper::client::connect::dns::GaiResolver>>;
 type SharedSettings = Arc<Mutex<Settings>>;
+
+#[derive(Error, Debug)]
+pub enum YaffleError {
+    #[error("I/O Error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Invalid Quickwit URI: {0}")]
+    UriBuild(#[from] InvalidUri),
+    #[error("Invalid Quickwit URI: {0}")]
+    UriParse(#[from] ParseError),
+    #[error("Quickwit Client Error: {0}")]
+    HyperClient(#[from] hyper::Error),
+    #[error("Create Index Error ({0}): {1}")]
+    CreateIndex(StatusCode, String),
+    #[error("HTTP Error: {0}")]
+    Http(#[from] hyper::http::Error),
+    #[error("JSON Serialization Error: {0}")]
+    JsonSerialize(#[from] serde_json::Error),
+}
 
 #[derive(Parser, Debug)]
 struct Args {
     #[arg(
-        short = 't',
-        default_value = "http://localhost:8080",
-        env = "TOSHI_URL"
+        short = 'q',
+        default_value = "http://localhost:7280",
+        env = "QUICKWIT_URL"
     )]
-    toshi_url: String,
+    quickwit_url: String,
+    #[arg(short = 'i', default_value = "yaffle_logs", env = "QUICKWIT_INDEX")]
+    quickwit_index: String,
 }
 
 pub struct Settings {
-    pub toshi_url: String,
-    pub index: u32,
-    pub max_docs: u32,
+    pub quickwit_url: String,
+    pub quickwit_index: String,
 }
 
-impl Settings {
-    fn index_name(&self) -> String {
-        make_index_name(self.index)
-    }
-}
-
-fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
+fn main() -> Result<(), YaffleError> {
     env_logger::init();
-    let Args { toshi_url } = Args::parse();
+    let Args {
+        mut quickwit_url,
+        quickwit_index,
+    } = Args::parse();
     let rt = tokio::runtime::Runtime::new().unwrap();
 
-    let max_docs = 1_000_000;
-    let index = rt.block_on(find_index(&toshi_url, max_docs))?;
-    debug!("Found index name yaffle_{}", index);
+    if quickwit_url.ends_with("/") {
+        quickwit_url.pop();
+    }
+
+    let client = hyper::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build_http::<hyper::Body>();
+    rt.block_on(get_or_create_index(&client, &quickwit_url, &quickwit_index))?;
+
+    // TODO: no need for Arc/Mutex now these are immutable?
     let settings = Arc::new(Mutex::new(Settings {
-        toshi_url,
-        index,
-        max_docs,
+        quickwit_url,
+        quickwit_index,
     }));
 
     let mut listenfd = ListenFd::from_env();
@@ -107,155 +126,75 @@ fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
         rt.block_on(TcpListener::bind("[::]:8088"))?
     };
     let http_stream = tokio_stream::wrappers::TcpListenerStream::new(http_listener);
-
-    rt.spawn(index_manager(settings.clone()));
     rt.spawn(websrv::run_http_server(
         settings.clone(),
         http_stream,
         shutdown_rx,
     ));
-    rt.block_on(async { async_dual_main(settings, gelf_rx, syslog_rx).await.unwrap() });
+
+    rt.block_on(async {
+        ingest_loop(&client, settings, gelf_rx, syslog_rx)
+            .await
+            .unwrap()
+    });
     shutdown_tx.send(()).ok();
 
     Ok(())
 }
 
-fn make_index_name(index: u32) -> String {
-    format!("yaffle_{}", index)
-}
-
-/// A response gotten from the _summary route for an index
-#[derive(Debug, Serialize, Deserialize)]
-struct SummaryResponse {
-    summaries: JsonOwnedKeysMap,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    segment_sizes: Option<SearcherSpaceUsage>,
-}
-
-fn index_is_open(summary: &SummaryResponse, max_docs: u32) -> bool {
-    summary
-        .segment_sizes
-        .as_ref()
-        .map(|sizes| {
-            sizes
-                .segments()
-                .iter()
-                .fold(0, |acc, segment| acc + segment.num_docs())
-                < max_docs
-        })
-        .unwrap_or(false)
-}
-
-async fn check_index(
-    c: &DefaultHyperToshi,
-    index: u32,
-    max_docs: u32,
-) -> Result<(bool, bool, u32), Box<dyn Error + Send + Sync>> {
-    let index_name = make_index_name(index);
-    let body = hyper::body::to_bytes(c.index_summary(&index_name, true).await?.into_body()).await?;
-    serde_json::from_slice(&body)
-        .map(|summary: SummaryResponse| {
-            let is_open = index_is_open(&summary, max_docs);
-            debug!(
-                "Index {} {} open",
-                index_name,
-                if is_open { "is" } else { "is not" }
-            );
-            Ok((true, is_open, index))
-        })
-        .unwrap_or(Ok((false, false, index)))
-}
-
-async fn index_manager(shared_settings: SharedSettings) {
-    loop {
-        sleep(Duration::from_secs(60)).await;
-        let (index, toshi_url, max_docs) = {
-            let settings = shared_settings.lock().unwrap();
-            (
-                settings.index,
-                settings.toshi_url.clone(),
-                settings.max_docs,
-            )
-        };
-        let c = HyperToshi::with_client(&toshi_url, hyper::Client::default());
-        debug!("index_manager background checking index {}...", index);
-        match check_index(&c, index, max_docs).await {
-            Ok((_, false, index)) => loop {
-                debug!("Index {} is closed, look for next...", index);
-                let next_index = index + 1;
-                match check_index(&c, next_index, max_docs).await {
-                    Ok((true, true, _)) => {
-                        debug!("Using index {} as next active write index", next_index);
-                        shared_settings.lock().unwrap().index = next_index;
-                        break;
-                    }
-                    Ok((false, _, _)) => {
-                        match c
-                            .create_index(make_index_name(next_index), TANTIVY_SCHEMA.clone())
-                            .await
-                        {
-                            Ok(_) => {
-                                shared_settings.lock().unwrap().index = next_index;
-                                break;
-                            }
-                            Err(e) => {
-                                warn!("Error creating next index in index_manager background task: {:?}", e);
-                                break;
-                            }
-                        }
-                    }
-                    Ok((true, false, _)) => continue,
-                    Err(e) => warn!(
-                        "Error looking for next index in index_manager background task: {:?}",
-                        e
-                    ),
-                }
+async fn get_or_create_index(
+    client: &Client<HttpConnector>,
+    quickwit_url: &str,
+    quickwit_index: &str,
+) -> Result<(), YaffleError> {
+    let describe_uri = [&quickwit_url, "api/v1/indexes", quickwit_index, "describe"].join("/");
+    let response = client.get(Uri::from_str(&describe_uri)?).await?;
+    if response.status() == StatusCode::NOT_FOUND {
+        debug!("No {} index found, creating new index...", quickwit_index);
+        let create_uri = [&quickwit_url, "api/v1/indexes"].join("/");
+        let request_body = quickwit::IndexCreateRequest {
+            doc_mapping: DocumentMapping {
+                field_mappings: Document::quickwit_mapping(),
+                mode: None,
+                tag_fields: Vec::default(),
+                store_source: false,
+                timestamp_field: "source_timestamp".to_string(),
             },
-            Ok((_, true, _)) => {}
-            Err(e) => warn!("Error in index_manager background task: {:?}", e),
+            index_id: quickwit_index.to_string(),
+            retention: RetentionSettings {
+                period: "90 days".to_string(),
+                schedule: "daily".to_string(),
+            },
+            search_settings: SearchSettings {
+                default_search_fields: vec!["message".to_string(), "full_message".to_string()],
+            },
+            version: "0.5".to_string(),
+        };
+        let mut response = client
+            .request(
+                Request::builder()
+                    .uri(Uri::from_str(&create_uri)?)
+                    .method("POST")
+                    .header("Content-Type", "application/json")
+                    .body(Body::from(serde_json::to_string(&request_body)?))?,
+            )
+            .await?;
+        if !response.status().is_success() {
+            return Err(YaffleError::CreateIndex(
+                response.status(),
+                String::from_utf8_lossy(
+                    hyper::body::to_bytes(response.body_mut()).await?.as_bytes(),
+                )
+                .to_string(),
+            ));
         }
+    } else {
+        debug!("Found existing index {}", quickwit_index);
     }
+    Ok(())
 }
 
-async fn find_first_open_index(
-    c: &DefaultHyperToshi,
-    start: u32,
-    max_docs: u32,
-) -> Result<u32, Box<dyn Error + Send + Sync>> {
-    let mut index = start;
-    while let (exists, false, _) = check_index(c, index, max_docs).await? {
-        if exists {
-            debug!("Does yaffle_{} exist? YES", index);
-            index += 1;
-        } else {
-            debug!("Does yaffle_{} exist? NO", index);
-            c.create_index(make_index_name(index), TANTIVY_SCHEMA.clone())
-                .await?;
-            // We now have a new, open index to use
-            break;
-        }
-    }
-    Ok(index)
-}
-
-async fn find_index(toshi_url: &str, max_docs: u32) -> Result<u32, Box<dyn Error + Send + Sync>> {
-    let client = hyper::Client::default();
-    let c = HyperToshi::with_client(toshi_url, client);
-    let indices: Vec<String> =
-        serde_json::from_slice(&hyper::body::to_bytes(c.list().await?.into_body()).await?)?;
-
-    for index_name in indices {
-        if index_name.starts_with("yaffle_") {
-            let index = u32::from_str_radix(index_name.strip_prefix("yaffle_").unwrap(), 10)?;
-            return Ok(find_first_open_index(&c, index, max_docs).await?);
-        }
-    }
-    debug!("No yaffle_* indexes at all found, creating new index yaffle_0...");
-    c.create_index("yaffle_0", TANTIVY_SCHEMA.clone()).await?;
-    Ok(0)
-}
-
-const COMMIT_EVERY_SECS: u32 = 10;
+const COMMIT_EVERY_SECS: u64 = 10;
 const BATCH_SIZE: usize = 10;
 
 #[derive(Debug)]
@@ -264,32 +203,24 @@ enum Incoming {
     Syslog(syslog::SyslogMessage),
 }
 
-async fn async_dual_main(
+async fn ingest_loop(
+    client: &Client<HttpConnector>,
     settings: SharedSettings,
     gelf_rx: mpsc::Receiver<(SocketAddr, gelf::GELFMessage)>,
     syslog_rx: mpsc::Receiver<(SocketAddr, syslog::SyslogMessage)>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), YaffleError> {
     // Merge the two streams of incoming messages
     let gelf_stream = ReceiverStream::new(gelf_rx).map(|(src, x)| (src, Incoming::Gelf(x)));
     let syslog_stream = ReceiverStream::new(syslog_rx).map(|(src, y)| (src, Incoming::Syslog(y)));
     let merged = gelf_stream.merge(syslog_stream);
 
-    let client = {
-        HyperToshi::with_client(
-            &settings.lock().unwrap().toshi_url,
-            hyper::Client::default(),
-        )
-    };
-    let c = &client;
-    let mut last_commit = Instant::now();
-    let commit_every = Duration::from_secs(COMMIT_EVERY_SECS.into());
-
     // Process and submit messages in batch
-    let mut chunks = Box::pin(merged.chunks_timeout(BATCH_SIZE, commit_every));
-    while let Some(mut chunk) = chunks.next().await {
+    let mut chunks =
+        Box::pin(merged.chunks_timeout(BATCH_SIZE, Duration::from_secs(COMMIT_EVERY_SECS)));
+    while let Some(ref chunk) = chunks.next().await {
         debug!("Processing a batch of {} message(s)", chunk.len());
-        let index_name = &settings.lock().unwrap().index_name();
-        let mut batch_results = join_all(chunk.drain(..).filter_map(|(src, record)| {
+        let mut buffer = Vec::new();
+        for (src, record) in chunk {
             let doc_result = match record {
                 Incoming::Gelf(msg) => Document::from_gelf(&msg),
                 Incoming::Syslog(msg) => Document::from_syslog(&msg),
@@ -297,48 +228,54 @@ async fn async_dual_main(
 
             match doc_result {
                 Ok(mut doc) if doc.is_valid() => {
-                    let commit = if last_commit.elapsed() >= commit_every {
-                        last_commit = Instant::now();
-                        true
-                    } else {
-                        false
-                    };
                     let src_ip = src.ip();
-                    Some(async move {
-                        doc.do_reverse_dns(src_ip).await;
-                        c.add_document(index_name, doc, Some(IndexOptions { commit }))
-                            .await
-                    })
+                    doc.do_reverse_dns(src_ip).await;
+                    serde_json::to_writer(&mut buffer, &doc).unwrap_or_else(|serde_err| {
+                        warn!("Unserializable document ({}): {:?}", serde_err, doc);
+                    });
+                    write!(buffer, "\n").ok();
                 }
                 Ok(invalid_doc) => {
                     warn!("Invalid document extracted: {:?}", invalid_doc);
-                    None
                 }
                 Err(e) => {
                     warn!("Document parsing error: {}", e);
-                    None
                 }
             }
-        }))
-        .await;
-        for result in batch_results.drain(..) {
-            match result {
-                Ok(response) => {
-                    if !response.status().is_success() {
-                        let response_msg =
-                            format!("Error response from add_document: {:?}", response);
-                        match hyper::body::to_bytes(response.into_body()).await {
-                            Ok(bytes) => warn!(
-                                "{}: {}",
-                                response_msg,
-                                String::from_utf8_lossy(bytes.as_ref())
-                            ),
-                            Err(e) => warn!("{}: body read error: {}", response_msg, e),
-                        }
-                    }
+        }
+        debug!("Average size per document: {}", buffer.len() / chunk.len());
+
+        let ingest_uri = {
+            let locked = settings.lock().unwrap();
+            [
+                &locked.quickwit_url,
+                "api/v1",
+                &locked.quickwit_index,
+                "ingest",
+            ]
+            .join("/")
+        };
+        match client
+            .request(
+                Request::builder()
+                    .uri(Uri::from_str(&ingest_uri)?)
+                    .method("POST")
+                    .body(Body::from(buffer))?,
+            )
+            .await
+        {
+            Ok(mut response) => {
+                if !response.status().is_success() {
+                    error!(
+                        "Error from Quickwit in ingest ({}): {}",
+                        response.status(),
+                        String::from_utf8_lossy(
+                            hyper::body::to_bytes(response.body_mut()).await?.as_bytes(),
+                        )
+                    );
                 }
-                Err(e) => warn!("Failed to insert document: {}", e),
             }
+            Err(http_err) => error!("Error submitting batch to Quickwit: {}", http_err),
         }
     }
 

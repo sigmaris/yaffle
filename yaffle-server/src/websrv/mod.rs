@@ -1,18 +1,24 @@
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
-use std::convert::TryInto;
 use std::iter::FromIterator;
+use std::str::FromStr;
+use std::time::Duration;
 
 use horrorshow::Template;
+use hyper::client::HttpConnector;
 use hyper::http::{header, StatusCode};
+use hyper::{Client, Uri};
+use log::debug;
 use serde::Deserialize;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::TcpListenerStream;
-use toshi::{AsyncClient, HyperToshi, Query, Search};
+use url::Url;
 use warp::{reply, Filter};
 
-use crate::{query::parse_query, schema::Document, SharedSettings};
+use crate::quickwit::SearchResults;
+use crate::YaffleError;
+use crate::{schema::Document, SharedSettings};
 
 mod templates;
 
@@ -22,12 +28,27 @@ pub(crate) struct SearchParams {
     q: String,
 }
 
-fn default_search() -> Search {
-    Search {
-        query: Some(Query::All),
-        facets: None,
-        limit: 500, // TODO: custom limit
-        sort_by: Some("source_timestamp".to_string()),
+fn build_search_uri(settings: &SharedSettings, sp: &SearchParams) -> Result<Uri, YaffleError> {
+    let locked = settings.lock().unwrap();
+    let mut search_url = Url::parse(&locked.quickwit_url)?;
+    search_url
+        .path_segments_mut()
+        .unwrap()
+        .extend(["api", "v1", &locked.quickwit_index, "search"]);
+    search_url
+        .query_pairs_mut()
+        .append_pair("query", if sp.q.is_empty() { "*" } else { &sp.q })
+        .append_pair("sort_by_field", "-source_timestamp");
+    debug!("Search URI: {}", search_url.as_str());
+    Ok(Uri::from_str(search_url.as_str())?)
+}
+
+fn search_result_with_error(error: impl ToString) -> SearchResults {
+    SearchResults {
+        elapsed_time_micros: 0,
+        errors: vec![error.to_string()],
+        hits: vec![],
+        num_hits: 0,
     }
 }
 
@@ -38,67 +59,38 @@ fn search_route(
         .and(warp::path::end())
         .and(warp::query())
         .and_then(move |sp: SearchParams| {
-            let c = HyperToshi::with_client(
-                &settings.lock().unwrap().toshi_url,
-                hyper::Client::default(),
-            );
-            let index_name = settings.lock().unwrap().index_name();
-            let mut warnings = vec![];
-            let query = if sp.q != "" {
-                parse_query(
-                    sp.q.trim(),
-                    if sp.reltime > 0 {
-                        Some(sp.reltime.try_into().unwrap())
-                    } else {
-                        None
-                    },
-                )
-                .map(|(_remaining, parsed)| parsed)
-                .unwrap_or_else(|e| {
-                    warnings.push(format!("Can't parse query: {}", e));
-                    Query::All
-                })
-            } else {
-                Query::All
-            };
+            let client: Client<HttpConnector> = hyper::Client::builder()
+                .pool_idle_timeout(Duration::from_secs(30))
+                .build_http::<hyper::Body>();
+            let shared_settings = settings.clone();
             async move {
-                let mut response = c
-                    .search::<&str, Document>(
-                        &index_name,
-                        Search {
-                            query: Some(query),
-                            facets: None,
-                            limit: 500, // TODO: custom limit
-                            sort_by: Some("source_timestamp".to_string()),
-                        },
-                    )
-                    .await;
-                if let Err(e) = response {
-                    warnings.push(format!("Error from Toshi: {}", e));
-                    response = c
-                        .search::<&str, Document>(&index_name, default_search())
-                        .await;
-                }
-                match response {
-                    Ok(results) => {
-                        let hashmaps: Vec<_> = results
-                            .get_docs()
-                            .iter()
-                            .map(|scored_doc| {
-                                let doc: &Document = &scored_doc.doc;
-                                doc.into()
-                            })
-                            .collect();
-                        let fields = fieldset(&hashmaps);
-                        Ok::<String, warp::reject::Rejection>(
-                            templates::base_page(templates::doc_list_content(
-                                &sp, &fields, &hashmaps, &warnings,
-                            ))
-                            .into_string()
-                            .unwrap(),
-                        )
+                match build_search_uri(&shared_settings, &sp) {
+                    Ok(search_uri) => {
+                        let result = client.get(search_uri).await;
+                        match result {
+                            Ok(mut response) => {
+                                let sr: SearchResults = hyper::body::to_bytes(response.body_mut())
+                                    .await
+                                    .map(|body_bytes| {
+                                        serde_json::from_slice(&body_bytes)
+                                            .unwrap_or_else(search_result_with_error)
+                                    })
+                                    .unwrap_or_else(search_result_with_error);
+                                let hashmaps: Vec<_> =
+                                    sr.hits.iter().map(|doc| doc.into()).collect();
+                                let fields = fieldset(&hashmaps);
+                                Ok::<String, warp::reject::Rejection>(
+                                    templates::base_page(templates::doc_list_content(
+                                        &sp, &fields, &hashmaps, &sr.errors,
+                                    ))
+                                    .into_string()
+                                    .unwrap(),
+                                )
+                            }
+                            Err(e) => Ok(format!("Error response from Toshi: {:?}", e)),
+                        }
                     }
-                    Err(e) => Ok(format!("Error response from Toshi: {:?}", e)),
+                    Err(uri_error) => Ok(format!("Error building search URI: {}", uri_error)),
                 }
             }
         })

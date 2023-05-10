@@ -2,7 +2,7 @@
 name = "yaffle-server"
 version = "0.1.0"
 authors = ["Hugh Cole-Baker <sigmaris@gmail.com>"]
-edition = "2018"
+edition = "2021"
 
 [dependencies]
 bytes = "0.5"
@@ -22,10 +22,9 @@ nom = "7"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = { version = "1.0", features = ["arbitrary_precision"] }
 tantivy = "^0.19"
+thiserror = "1.0"
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
-toshi = { path = "../Toshi/toshi-client", default-features = false, features = [
-    "hyper_client",
-] }
+url = "2.3"
 warp = "0.3"
 yaffle-macros = { path = "../yaffle-macros" }
