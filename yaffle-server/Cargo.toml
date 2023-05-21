@@ -1,30 +1,39 @@
 [package]
 name = "yaffle-server"
 version = "0.1.0"
-authors = ["Hugh Cole-Baker <sigmaris@gmail.com>"]
 edition = "2021"
 
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
 [dependencies]
-bytes = "0.5"
-chrono = "0.4"
-clap = { version = "4", features = ["derive", "env"] }
-dns-lookup = "1.0"
-env_logger = "0.10"
-flate2 = "1.0"
-futures = "0.3"
-futures-batch = "0.6"
-horrorshow = "0.8"
-hyper = { version = "0.14", features = ["stream"] }
-lazy_static = "1.4"
-listenfd = "1"
-log = "0.4"
-nom = "7"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = { version = "1.0", features = ["arbitrary_precision"] }
-tantivy = "^0.19"
-thiserror = "1.0"
-tokio = { version = "1", features = ["full"] }
-tokio-stream = { version = "0.1", features = ["net"] }
-url = "2.3"
-warp = "0.3"
+app = { path = "../app", default-features = false, features = ["ssr"] }
 yaffle-macros = { path = "../yaffle-macros" }
+leptos = { workspace = true, features = ["ssr"] }
+leptos_axum.workspace = true
+
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+chrono.workspace = true
+clap.workspace = true
+cookie.workspace = true
+dns-lookup.workspace = true
+flate2.workspace = true
+futures.workspace = true
+futures-batch.workspace = true
+http.workspace = true
+hyper.workspace = true
+lazy_static.workspace = true
+listenfd.workspace = true
+log.workspace = true
+nom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+simple_logger.workspace = true
+tantivy.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+url.workspace = true

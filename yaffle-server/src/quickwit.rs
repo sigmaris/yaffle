@@ -1,6 +1,5 @@
-use serde::{Deserialize, Serialize};
-
 use crate::schema::Document;
+use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Debug)]
 pub(crate) enum Tokenizer {

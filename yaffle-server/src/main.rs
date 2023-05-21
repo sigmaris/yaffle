@@ -1,33 +1,50 @@
+mod fileserv;
 mod gelf;
 mod quickwit;
 mod schema;
 mod syslog;
-mod websrv;
 
-use crate::quickwit::{DocumentMapping, RetentionSettings, SearchSettings};
-use crate::schema::{Document, YaffleSchema};
+use crate::fileserv::file_and_error_handler;
+use crate::schema::YaffleSchema;
+use app::settings::{Settings, SharedSettings};
+use app::*;
+use async_trait::async_trait;
+use axum::{
+    body::Body,
+    extract::{Extension, Path, RawQuery, State},
+    http::{HeaderMap, Request},
+    response::IntoResponse,
+    routing::post,
+    Router,
+};
 use clap::Parser;
 use hyper::client::HttpConnector;
 use hyper::http::uri::InvalidUri;
-use hyper::{Body, Client, Request, StatusCode, Uri};
+use hyper::{Client, StatusCode, Uri};
 use lazy_static::lazy_static;
+use leptos::*;
+use leptos_axum::{generate_route_list, LeptosRoutes};
 use listenfd::ListenFd;
 use log::{debug, error, warn};
-use nom::AsBytes;
+use quickwit::SearchResults;
+use std::any::Any;
+use std::borrow::Cow;
+use std::cmp::Ordering;
+use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::net::SocketAddr;
+use std::net::TcpListener as StdTcpListener;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tantivy::schema::Schema;
 use thiserror::Error;
-use tokio::net::{TcpListener, UdpSocket};
-use tokio::sync::{mpsc, oneshot};
+use tokio::net::UdpSocket;
+use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
-use url::ParseError;
-
-type SharedSettings = Arc<Mutex<Settings>>;
+use url::{ParseError, Url};
 
 #[derive(Error, Debug)]
 pub enum YaffleError {
@@ -47,102 +64,11 @@ pub enum YaffleError {
     JsonSerialize(#[from] serde_json::Error),
 }
 
-#[derive(Parser, Debug)]
-struct Args {
-    #[arg(
-        short = 'q',
-        default_value = "http://localhost:7280",
-        env = "QUICKWIT_URL"
-    )]
-    quickwit_url: String,
-    #[arg(short = 'i', default_value = "yaffle_logs", env = "QUICKWIT_INDEX")]
-    quickwit_index: String,
+lazy_static! {
+    static ref TANTIVY_SCHEMA: Schema = schema::Document::tantivy_schema();
 }
 
-pub struct Settings {
-    pub quickwit_url: String,
-    pub quickwit_index: String,
-}
-
-fn main() -> Result<(), YaffleError> {
-    env_logger::init();
-    let Args {
-        mut quickwit_url,
-        quickwit_index,
-    } = Args::parse();
-    let rt = tokio::runtime::Runtime::new().unwrap();
-
-    if quickwit_url.ends_with("/") {
-        quickwit_url.pop();
-    }
-
-    let client = hyper::Client::builder()
-        .pool_idle_timeout(Duration::from_secs(30))
-        .build_http::<hyper::Body>();
-    rt.block_on(get_or_create_index(&client, &quickwit_url, &quickwit_index))?;
-
-    // TODO: no need for Arc/Mutex now these are immutable?
-    let settings = Arc::new(Mutex::new(Settings {
-        quickwit_url,
-        quickwit_index,
-    }));
-
-    let mut listenfd = ListenFd::from_env();
-
-    // Listen for GELF messages
-    let (gelf_tx, gelf_rx) = mpsc::channel(10);
-    let gelf_sock = if let Some(std_sock) = listenfd.take_udp_socket(0).ok().flatten() {
-        debug!("Using passed GELF UDP socket {:?}", std_sock);
-        std_sock.set_nonblocking(true)?;
-        rt.block_on(async { UdpSocket::from_std(std_sock) })?
-    } else {
-        debug!("Binding to [::]:12201 for GELF UDP");
-        rt.block_on(UdpSocket::bind("[::]:12201"))?
-    };
-
-    rt.spawn(async { gelf::run_recv_loop(gelf_sock, gelf_tx).await.unwrap() });
-
-    // Listen for Syslog messages
-    let (syslog_tx, syslog_rx) = mpsc::channel(10);
-    let syslog_sock = if let Some(std_sock) = listenfd.take_udp_socket(1).ok().flatten() {
-        debug!("Using passed Syslog UDP socket {:?}", std_sock);
-        std_sock.set_nonblocking(true)?;
-        rt.block_on(async { UdpSocket::from_std(std_sock) })?
-    } else {
-        debug!("Binding to [::]:10514 for Syslog UDP");
-        rt.block_on(UdpSocket::bind("[::]:10514"))?
-    };
-
-    rt.spawn(async { syslog::run_recv_loop(syslog_sock, syslog_tx).await.unwrap() });
-
-    let (shutdown_tx, shutdown_rx) = oneshot::channel();
-    // Create HTTP listener and then leak it for the remainder of the program's lifetime
-    let http_listener = if let Some(std_sock) = listenfd.take_tcp_listener(2).ok().flatten() {
-        debug!("Using passed HTTP socket {:?}", std_sock);
-        std_sock.set_nonblocking(true)?;
-        rt.block_on(async { TcpListener::from_std(std_sock) })?
-    } else {
-        debug!("Binding to [::]:8088 for HTTP");
-        rt.block_on(TcpListener::bind("[::]:8088"))?
-    };
-    let http_stream = tokio_stream::wrappers::TcpListenerStream::new(http_listener);
-    rt.spawn(websrv::run_http_server(
-        settings.clone(),
-        http_stream,
-        shutdown_rx,
-    ));
-
-    rt.block_on(async {
-        ingest_loop(&client, settings, gelf_rx, syslog_rx)
-            .await
-            .unwrap()
-    });
-    shutdown_tx.send(()).ok();
-
-    Ok(())
-}
-
-async fn get_or_create_index(
+pub(crate) async fn get_or_create_index(
     client: &Client<HttpConnector>,
     quickwit_url: &str,
     quickwit_index: &str,
@@ -153,39 +79,37 @@ async fn get_or_create_index(
         debug!("No {} index found, creating new index...", quickwit_index);
         let create_uri = [&quickwit_url, "api/v1/indexes"].join("/");
         let request_body = quickwit::IndexCreateRequest {
-            doc_mapping: DocumentMapping {
-                field_mappings: Document::quickwit_mapping(),
+            doc_mapping: quickwit::DocumentMapping {
+                field_mappings: schema::Document::quickwit_mapping(),
                 mode: None,
                 tag_fields: Vec::default(),
                 store_source: false,
                 timestamp_field: "source_timestamp".to_string(),
             },
             index_id: quickwit_index.to_string(),
-            retention: RetentionSettings {
+            retention: quickwit::RetentionSettings {
                 period: "90 days".to_string(),
                 schedule: "daily".to_string(),
             },
-            search_settings: SearchSettings {
+            search_settings: quickwit::SearchSettings {
                 default_search_fields: vec!["message".to_string(), "full_message".to_string()],
             },
             version: "0.5".to_string(),
         };
         let mut response = client
             .request(
-                Request::builder()
+                hyper::Request::builder()
                     .uri(Uri::from_str(&create_uri)?)
                     .method("POST")
                     .header("Content-Type", "application/json")
-                    .body(Body::from(serde_json::to_string(&request_body)?))?,
+                    .body(hyper::Body::from(serde_json::to_string(&request_body)?))?,
             )
             .await?;
         if !response.status().is_success() {
             return Err(YaffleError::CreateIndex(
                 response.status(),
-                String::from_utf8_lossy(
-                    hyper::body::to_bytes(response.body_mut()).await?.as_bytes(),
-                )
-                .to_string(),
+                String::from_utf8_lossy(hyper::body::to_bytes(response.body_mut()).await?.as_ref())
+                    .to_string(),
             ));
         }
     } else {
@@ -203,7 +127,7 @@ enum Incoming {
     Syslog(syslog::SyslogMessage),
 }
 
-async fn ingest_loop(
+pub(crate) async fn ingest_loop(
     client: &Client<HttpConnector>,
     settings: SharedSettings,
     gelf_rx: mpsc::Receiver<(SocketAddr, gelf::GELFMessage)>,
@@ -221,27 +145,30 @@ async fn ingest_loop(
         debug!("Processing a batch of {} message(s)", chunk.len());
         let mut buffer = Vec::new();
         for (src, record) in chunk {
-            let doc_result = match record {
-                Incoming::Gelf(msg) => Document::from_gelf(&msg),
-                Incoming::Syslog(msg) => Document::from_syslog(&msg),
+            let mut doc = {
+                let decode_result = match record {
+                    Incoming::Gelf(msg) => schema::Document::from_gelf(&msg),
+                    Incoming::Syslog(msg) => schema::Document::from_syslog(&msg),
+                };
+                match decode_result {
+                    Ok(valid_doc) if valid_doc.is_valid() => valid_doc,
+                    Ok(invalid_doc) => {
+                        warn!("Invalid document extracted: {:?}", invalid_doc);
+                        continue;
+                    }
+                    Err(e) => {
+                        warn!("Document parsing error: {}", e);
+                        continue;
+                    }
+                }
             };
 
-            match doc_result {
-                Ok(mut doc) if doc.is_valid() => {
-                    let src_ip = src.ip();
-                    doc.do_reverse_dns(src_ip).await;
-                    serde_json::to_writer(&mut buffer, &doc).unwrap_or_else(|serde_err| {
-                        warn!("Unserializable document ({}): {:?}", serde_err, doc);
-                    });
-                    write!(buffer, "\n").ok();
-                }
-                Ok(invalid_doc) => {
-                    warn!("Invalid document extracted: {:?}", invalid_doc);
-                }
-                Err(e) => {
-                    warn!("Document parsing error: {}", e);
-                }
-            }
+            let src_ip = src.ip();
+            doc.do_reverse_dns(src_ip).await;
+            serde_json::to_writer(&mut buffer, &doc).unwrap_or_else(|serde_err| {
+                warn!("Unserializable document ({}): {:?}", serde_err, doc);
+            });
+            write!(buffer, "\n").ok();
         }
         debug!("Average size per document: {}", buffer.len() / chunk.len());
 
@@ -270,7 +197,7 @@ async fn ingest_loop(
                         "Error from Quickwit in ingest ({}): {}",
                         response.status(),
                         String::from_utf8_lossy(
-                            hyper::body::to_bytes(response.body_mut()).await?.as_bytes(),
+                            hyper::body::to_bytes(response.body_mut()).await?.as_ref(),
                         )
                     );
                 }
@@ -282,6 +209,237 @@ async fn ingest_loop(
     Ok(())
 }
 
-lazy_static! {
-    static ref TANTIVY_SCHEMA: Schema = Document::tantivy_schema();
+pub(crate) async fn run_server(
+    settings: SharedSettings,
+    gelf_socket: UdpSocket,
+    syslog_socket: UdpSocket,
+) -> Result<(), YaffleError> {
+    let client = hyper::Client::builder()
+        .pool_idle_timeout(Duration::from_secs(30))
+        .build_http::<hyper::Body>();
+
+    let (url, index) = {
+        let locked = settings.lock().unwrap();
+        (locked.quickwit_url.clone(), locked.quickwit_index.clone())
+    };
+
+    get_or_create_index(&client, &url, &index).await?;
+
+    let (gelf_tx, gelf_rx) = mpsc::channel(10);
+    let (syslog_tx, syslog_rx) = mpsc::channel(10);
+
+    tokio::spawn(gelf::run_recv_loop(gelf_socket, gelf_tx));
+    tokio::spawn(syslog::run_recv_loop(syslog_socket, syslog_tx));
+    ingest_loop(&client, settings, gelf_rx, syslog_rx).await
+}
+
+#[derive(Parser, Debug)]
+struct Args {
+    #[arg(
+        short = 'q',
+        default_value = "http://localhost:7280",
+        env = "QUICKWIT_URL"
+    )]
+    quickwit_url: String,
+    #[arg(short = 'i', default_value = "yaffle_logs", env = "QUICKWIT_INDEX")]
+    quickwit_index: String,
+}
+
+async fn handle_server_fns_wrapper(
+    State(server_api): State<SharedServerAPI>,
+    path: Path<String>,
+    headers: HeaderMap,
+    raw_query: RawQuery,
+    req: Request<Body>,
+) -> impl IntoResponse {
+    leptos_axum::handle_server_fns_with_context(
+        path,
+        headers,
+        raw_query,
+        move |cx| {
+            provide_context(cx, server_api.clone());
+        },
+        req,
+    )
+    .await
+}
+
+#[tokio::main]
+async fn main() -> Result<(), YaffleError> {
+    simple_logger::init_with_level(log::Level::Debug).expect("couldn't initialize logging");
+
+    let Args {
+        mut quickwit_url,
+        quickwit_index,
+    } = Args::parse();
+
+    if quickwit_url.ends_with("/") {
+        quickwit_url.pop();
+    }
+
+    let settings: SharedSettings = Arc::new(Mutex::new(Settings {
+        quickwit_url,
+        quickwit_index,
+    }));
+
+    register_server_functions();
+
+    // Setting get_configuration(None) means we'll be using cargo-leptos's env values
+    // For deployment these variables are:
+    // <https://github.com/leptos-rs/start-axum#executing-a-server-on-a-remote-machine-without-the-toolchain>
+    // Alternately a file can be specified such as Some("Cargo.toml")
+    // The file would need to be included with the executable when moved to deployment
+    let conf = get_configuration(None).await.unwrap();
+    let leptos_options = conf.leptos_options;
+    let addr = leptos_options.site_addr;
+    let routes = generate_route_list(|cx| view! { cx, <App/> }).await;
+
+    // build our application with a route
+    let shared_server = Arc::new(ServerAPIImpl {
+        settings: settings.clone(),
+        client: hyper::Client::builder()
+            .pool_idle_timeout(Duration::from_secs(30))
+            .build_http::<hyper::Body>(),
+    });
+    let app = Router::new()
+        .route(
+            "/api/*fn_name",
+            post(handle_server_fns_wrapper).with_state(shared_server.clone()),
+        )
+        .leptos_routes(
+            leptos_options.clone(),
+            routes,
+            move |cx| view! { cx, <App server_api=shared_server.clone() /> },
+        )
+        .fallback(file_and_error_handler)
+        .layer(Extension(Arc::new(leptos_options)));
+
+    let mut listenfd = ListenFd::from_env();
+
+    // Set up socket to listen for GELF messages
+    let gelf_sock = if let Some(std_sock) = listenfd.take_udp_socket(0).ok().flatten() {
+        debug!("Using passed GELF UDP socket {:?}", std_sock);
+        std_sock.set_nonblocking(true)?;
+        UdpSocket::from_std(std_sock)?
+    } else {
+        debug!("Binding to [::]:12201 for GELF UDP");
+        UdpSocket::bind("[::]:12201").await?
+    };
+
+    // Listen for Syslog messages
+    let syslog_sock = if let Some(std_sock) = listenfd.take_udp_socket(1).ok().flatten() {
+        debug!("Using passed Syslog UDP socket {:?}", std_sock);
+        std_sock.set_nonblocking(true)?;
+        UdpSocket::from_std(std_sock)?
+    } else {
+        debug!("Binding to [::]:10514 for Syslog UDP");
+        UdpSocket::bind("[::]:10514").await?
+    };
+
+    let (shutdown_tx, shutdown_rx) = oneshot::channel();
+    // Create HTTP listener and then leak it for the remainder of the program's lifetime
+    let http_listener = if let Some(std_sock) = listenfd.take_tcp_listener(2).ok().flatten() {
+        debug!("Using passed HTTP socket {:?}", std_sock);
+        std_sock
+    } else {
+        debug!("Binding to {} for HTTP", addr);
+        StdTcpListener::bind(addr)?
+    };
+    // run our app with hyper
+    // `axum::Server` is a re-export of `hyper::Server`
+    let server = axum::Server::from_tcp(http_listener)
+        .expect("Creating HTTP server on TCP port")
+        .serve(app.into_make_service());
+
+    tokio::spawn(async {
+        if let Err(e) = run_server(settings, gelf_sock, syslog_sock).await {
+            error!("GELF/Syslog receiver exited with error: {}", e);
+        }
+        shutdown_tx.send(()).ok();
+    });
+
+    server
+        .with_graceful_shutdown(async {
+            shutdown_rx.await.ok();
+        })
+        .await?;
+
+    Ok(())
+}
+
+fn build_search_uri(settings: &SharedSettings, sp: &SearchOptions) -> Result<Uri, YaffleError> {
+    let locked = settings.lock().unwrap();
+    let mut search_url = Url::parse(&locked.quickwit_url)?;
+    search_url
+        .path_segments_mut()
+        .unwrap()
+        .extend(["api", "v1", &locked.quickwit_index, "search"]);
+    search_url
+        .query_pairs_mut()
+        .append_pair("query", if sp.query.is_empty() { "*" } else { &sp.query })
+        .append_pair("sort_by_field", "-source_timestamp");
+    debug!("Search URI: {}", search_url.as_str());
+    Ok(Uri::from_str(search_url.as_str())?)
+}
+
+struct ServerAPIImpl {
+    settings: SharedSettings,
+    client: Client<HttpConnector>,
+}
+
+#[async_trait]
+impl ServerAPI for ServerAPIImpl {
+    async fn search(
+        &self,
+        options: &SearchOptions,
+    ) -> Result<(Vec<String>, Vec<Vec<Option<String>>>), String> {
+        let search_uri = build_search_uri(&self.settings, options).map_err(|e| e.to_string())?;
+
+        let mut response = self
+            .client
+            .get(search_uri)
+            .await
+            .map_err(|e| e.to_string())?;
+        let sr: SearchResults = hyper::body::to_bytes(response.body_mut())
+            .await
+            .map_err(|e| e.to_string())
+            .and_then(|body_bytes| {
+                serde_json::from_slice(&body_bytes).map_err(|e| e.to_string())
+            })?;
+        let mut keys: HashSet<String> = HashSet::new();
+        let hashmaps: Vec<HashMap<&str, Cow<'_, str>>> = sr
+            .hits
+            .iter()
+            .map(|doc| {
+                let doc_hashmap: HashMap<&str, Cow<'_, str>> = doc.into();
+                keys.extend(doc_hashmap.keys().map(|key| key.to_string()));
+                doc_hashmap
+            })
+            .collect();
+        let mut keys = Vec::from_iter(keys);
+        keys.sort_by(field_custom_sort);
+        let num_cols = keys.len();
+        let rows = hashmaps
+            .into_iter()
+            .map(|hm| {
+                let mut vals = Vec::with_capacity(num_cols);
+                for key in &keys {
+                    vals.push(hm.get(key.as_str()).map(|cow| cow.to_string()));
+                }
+                vals
+            })
+            .collect();
+
+        Ok((keys, rows))
+    }
+}
+
+fn field_custom_sort(a: &String, b: &String) -> Ordering {
+    if a == "source_timestamp" {
+        Ordering::Less
+    } else if b == "source_timestamp" {
+        Ordering::Greater
+    } else {
+        a.cmp(b)
+    }
 }

@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::net::SocketAddr;
 
 use chrono::{
@@ -14,6 +13,7 @@ use nom::combinator::{map, map_res, opt, recognize, rest, value};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
@@ -211,7 +211,7 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
 pub async fn run_recv_loop(
     socket: UdpSocket,
     syslog_pipe: Sender<(SocketAddr, SyslogMessage)>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), SendError<(SocketAddr, SyslogMessage)>> {
     let mut buf = [0; 65536];
     loop {
         match socket.recv_from(&mut buf).await {
