@@ -19,9 +19,6 @@ leptos_meta = { version = "0.3", default-features = false, features = [
 leptos_router = { version = "0.3", default-features = false, features = [
     "stable",
 ] }
-leptos_dom = { version = "0.3", default-features = false, features = [
-    "stable",
-] }
 leptos_axum = { version = "0.3" }
 
 async-trait = "0.1"

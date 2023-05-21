@@ -42,7 +42,7 @@ pub(crate) trait YaffleSchema {
 
     fn convert_hex_to_uint(val: &Value) -> Result<u64, Box<dyn Error>> {
         match val {
-            Value::String(s) => Ok(u64::from_str_radix(&s, 16)?),
+            Value::String(s) => Ok(u64::from_str_radix(s, 16)?),
             Value::Number(n) => n
                 .as_u64()
                 .ok_or_else(|| format!("Can't represent {} as u64", n).into()),

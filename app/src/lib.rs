@@ -81,8 +81,11 @@ fn extract_app_state(cx: Scope) -> AppState {
 pub fn App(cx: Scope, #[prop(optional)] server_api: Option<SharedServerAPI>) -> impl IntoView {
     // Provides context that manages stylesheets, titles, meta tags, etc.
     provide_meta_context(cx);
+
     // If we are running on the server, provide the server API
-    server_api.map(|some_api| provide_context(cx, some_api));
+    if let Some(some_api) = server_api {
+        provide_context(cx, some_api)
+    }
 
     // Extract app state from cookies
     provide_context(cx, extract_app_state(cx));
@@ -111,7 +114,7 @@ fn SearchPage(cx: Scope) -> impl IntoView {
     let maybe_qstr = use_query::<SearchParams>(cx);
     let params_signal = move || {
         let mut p = maybe_qstr.get().unwrap_or_default();
-        if p.q.as_ref().map(String::as_str) == Some("") {
+        if p.q.as_deref() == Some("") {
             p.q = None;
         }
         (p.reltime.unwrap_or(5), p.q.unwrap_or("*".to_string()))
@@ -127,10 +130,8 @@ fn SearchPage(cx: Scope) -> impl IntoView {
             .join(",");
         use wasm_bindgen::JsCast;
         web_sys::window()
-            .map(|w| w.document())
-            .flatten()
-            .map(|d| d.dyn_into::<web_sys::HtmlDocument>().ok())
-            .flatten()
+            .and_then(|w| w.document())
+            .and_then(|d| d.dyn_into::<web_sys::HtmlDocument>().ok())
             .map(|d| d.set_cookie(format!("cols={}", cookie_list).as_str()));
     });
     let search_res = create_resource(cx, params_signal, move |value| async move {
@@ -140,7 +141,7 @@ fn SearchPage(cx: Scope) -> impl IntoView {
         <nav class="navbar navbar-light flex-md-nowrap p-0">
             <Form method="GET" action="" class="form-inline col-md-12">
                 <select name="reltime" class="custom-select custom-select-sm col-auto mx-1 my-2">
-                    {RELTIMES.into_iter().map(|(val, label)|
+                    {RELTIMES.iter().map(|(val, label)|
                         view! { cx, <option selected=params_signal().0 == *val value=*val>{label.to_string()}</option> }
                     ).collect_view(cx)}
                 </select>
@@ -295,7 +296,7 @@ pub async fn perform_search(
     server_api
         .search(&params)
         .await
-        .map_err(|err| ServerFnError::ServerError(err))
+        .map_err(ServerFnError::ServerError)
 }
 
 #[cfg(feature = "ssr")]

@@ -39,7 +39,7 @@ fn constructor_expr(
 ) -> TokenStream {
     let mut expr = None;
     for source_field in source_fields {
-        let accessor = source_field.conversion_expr(&source_ident, syslog);
+        let accessor = source_field.conversion_expr(source_ident, syslog);
         expr = expr
             .map(|existing| quote! { #existing.or(#accessor) })
             .or(Some(accessor));
@@ -173,8 +173,7 @@ fn process_inner_attr(inner: &NestedMeta) -> Option<FieldValueConversion> {
             // TODO: check error coming from from_attribute
             inner_path
                 .get_ident()
-                .map(|i| FieldValueConversion::from_attribute(i.to_string(), "none"))
-                .flatten()
+                .and_then(|i| FieldValueConversion::from_attribute(i.to_string(), "none"))
         }
         NestedMeta::Meta(Meta::NameValue(MetaNameValue {
             path,
@@ -182,8 +181,7 @@ fn process_inner_attr(inner: &NestedMeta) -> Option<FieldValueConversion> {
             ..
         })) => path
             .get_ident()
-            .map(|i| FieldValueConversion::from_attribute(i.to_string(), &conv.value()))
-            .flatten(),
+            .and_then(|i| FieldValueConversion::from_attribute(i.to_string(), &conv.value())),
         NestedMeta::Lit(Lit::Str(lit_str)) => {
             FieldValueConversion::from_attribute(lit_str.value(), "none")
         }

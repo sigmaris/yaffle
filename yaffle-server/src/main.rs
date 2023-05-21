@@ -27,7 +27,6 @@ use leptos_axum::{generate_route_list, LeptosRoutes};
 use listenfd::ListenFd;
 use log::{debug, error, warn};
 use quickwit::SearchResults;
-use std::any::Any;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -73,11 +72,11 @@ pub(crate) async fn get_or_create_index(
     quickwit_url: &str,
     quickwit_index: &str,
 ) -> Result<(), YaffleError> {
-    let describe_uri = [&quickwit_url, "api/v1/indexes", quickwit_index, "describe"].join("/");
+    let describe_uri = [quickwit_url, "api/v1/indexes", quickwit_index, "describe"].join("/");
     let response = client.get(Uri::from_str(&describe_uri)?).await?;
     if response.status() == StatusCode::NOT_FOUND {
         debug!("No {} index found, creating new index...", quickwit_index);
-        let create_uri = [&quickwit_url, "api/v1/indexes"].join("/");
+        let create_uri = [quickwit_url, "api/v1/indexes"].join("/");
         let request_body = quickwit::IndexCreateRequest {
             doc_mapping: quickwit::DocumentMapping {
                 field_mappings: schema::Document::quickwit_mapping(),
@@ -147,8 +146,8 @@ pub(crate) async fn ingest_loop(
         for (src, record) in chunk {
             let mut doc = {
                 let decode_result = match record {
-                    Incoming::Gelf(msg) => schema::Document::from_gelf(&msg),
-                    Incoming::Syslog(msg) => schema::Document::from_syslog(&msg),
+                    Incoming::Gelf(msg) => schema::Document::from_gelf(msg),
+                    Incoming::Syslog(msg) => schema::Document::from_syslog(msg),
                 };
                 match decode_result {
                     Ok(valid_doc) if valid_doc.is_valid() => valid_doc,
@@ -168,7 +167,7 @@ pub(crate) async fn ingest_loop(
             serde_json::to_writer(&mut buffer, &doc).unwrap_or_else(|serde_err| {
                 warn!("Unserializable document ({}): {:?}", serde_err, doc);
             });
-            write!(buffer, "\n").ok();
+            writeln!(buffer).ok();
         }
         debug!("Average size per document: {}", buffer.len() / chunk.len());
 
@@ -283,7 +282,7 @@ async fn main() -> Result<(), YaffleError> {
         quickwit_index,
     } = Args::parse();
 
-    if quickwit_url.ends_with("/") {
+    if quickwit_url.ends_with('/') {
         quickwit_url.pop();
     }
 
