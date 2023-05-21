@@ -48,9 +48,9 @@ fn app_state_from_cookies<'a>(cookies_hdrs: impl Iterator<Item = &'a str>) -> Ap
     AppState::default()
 }
 
+#[cfg(feature = "ssr")]
 fn extract_app_state(cx: Scope) -> AppState {
-    #[cfg(feature = "ssr")]
-    let state = use_context::<leptos_axum::RequestParts>(cx)
+    use_context::<leptos_axum::RequestParts>(cx)
         .map(|req_parts| {
             app_state_from_cookies(
                 req_parts
@@ -60,23 +60,21 @@ fn extract_app_state(cx: Scope) -> AppState {
                     .filter_map(|val| val.to_str().ok()),
             )
         })
-        .unwrap_or_default();
+        .unwrap_or_default()
+}
 
-    #[cfg(feature = "hydrate")]
-    let state = {
-        use wasm_bindgen::JsCast;
-        web_sys::window()
-            .map(|w| w.document())
-            .flatten()
-            .map(|d| d.dyn_into::<web_sys::HtmlDocument>().ok())
-            .flatten()
-            .map(|d| d.cookie().ok())
-            .flatten()
-            .map(|window_cookie| app_state_from_cookies([window_cookie].iter().map(|s| s.as_str())))
-            .unwrap_or_default()
-    };
-
-    state
+#[cfg(not(feature = "ssr"))]
+fn extract_app_state(cx: Scope) -> AppState {
+    use wasm_bindgen::JsCast;
+    web_sys::window()
+        .map(|w| w.document())
+        .flatten()
+        .map(|d| d.dyn_into::<web_sys::HtmlDocument>().ok())
+        .flatten()
+        .map(|d| d.cookie().ok())
+        .flatten()
+        .map(|window_cookie| app_state_from_cookies([window_cookie].iter().map(|s| s.as_str())))
+        .unwrap_or_default()
 }
 
 #[component]

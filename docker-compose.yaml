@@ -3,9 +3,16 @@ services:
     image: ghcr.io/sigmaris/yaffle:latest
     init: true
     environment:
-      - TOSHI_URL=http://toshi:8080
-  toshi:
-    image: ghcr.io/sigmaris/toshi:latest
-    init: true
+      QUICKWIT_URL: http://quickwit:7280
     ports:
-      - "8080:8080/tcp"
+      - "8088:8088/tcp"
+  quickwit:
+    image: quickwit/quickwit:qw-0.5.1-multiarch
+    init: true
+    environment:
+      QW_ENABLE_OTLP_ENDPOINT: false
+      QW_ENABLE_JAEGER_ENDPOINT: false
+    command:
+      - run
+    ports:
+      - "7280:7280/tcp"

@@ -218,12 +218,22 @@ pub(crate) async fn run_server(
         .pool_idle_timeout(Duration::from_secs(30))
         .build_http::<hyper::Body>();
 
-    let (url, index) = {
-        let locked = settings.lock().unwrap();
-        (locked.quickwit_url.clone(), locked.quickwit_index.clone())
-    };
+    let mut connect_wait = 1;
+    loop {
+        let (url, index) = {
+            let locked = settings.lock().unwrap();
+            (locked.quickwit_url.clone(), locked.quickwit_index.clone())
+        };
 
-    get_or_create_index(&client, &url, &index).await?;
+        match get_or_create_index(&client, &url, &index).await {
+            Ok(_) => break,
+            Err(err) => {
+                warn!("Quickwit connect/init error: {}", err);
+                tokio::time::sleep(Duration::from_secs(connect_wait)).await;
+                connect_wait = (connect_wait * 2).min(10);
+            }
+        }
+    }
 
     let (gelf_tx, gelf_rx) = mpsc::channel(10);
     let (syslog_tx, syslog_rx) = mpsc::channel(10);
