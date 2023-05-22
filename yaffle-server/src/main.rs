@@ -275,7 +275,7 @@ async fn handle_server_fns_wrapper(
 
 #[tokio::main]
 async fn main() -> Result<(), YaffleError> {
-    simple_logger::init_with_level(log::Level::Debug).expect("couldn't initialize logging");
+    env_logger::init();
 
     let Args {
         mut quickwit_url,
