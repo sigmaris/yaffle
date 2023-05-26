@@ -1,10 +1,8 @@
-mod fileserv;
 mod gelf;
 mod quickwit;
 mod schema;
 mod syslog;
 
-use crate::fileserv::file_and_error_handler;
 use crate::schema::YaffleSchema;
 use app::settings::{Settings, SharedSettings};
 use app::*;
@@ -43,6 +41,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_stream::StreamExt;
+use tower_http::services::ServeDir;
 use url::{ParseError, Url};
 
 #[derive(Error, Debug)]
@@ -320,7 +319,11 @@ async fn main() -> Result<(), YaffleError> {
             routes,
             move |cx| view! { cx, <App server_api=shared_server.clone() /> },
         )
-        .fallback(file_and_error_handler)
+        .fallback_service(
+            ServeDir::new(&leptos_options.site_root)
+                .precompressed_br()
+                .precompressed_gzip(),
+        )
         .layer(Extension(Arc::new(leptos_options)));
 
     let mut listenfd = ListenFd::from_env();
