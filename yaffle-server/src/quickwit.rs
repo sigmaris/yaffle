@@ -1,6 +1,7 @@
 use crate::schema::Document;
 use serde::{Deserialize, Serialize};
 
+#[allow(dead_code)]
 #[derive(Serialize, Debug)]
 pub(crate) enum Tokenizer {
     #[serde(rename = "default")]
@@ -13,6 +14,7 @@ pub(crate) enum Tokenizer {
     ChineseCompatible,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Debug)]
 pub(crate) enum RecordOption {
     #[serde(rename = "basic")]
@@ -23,6 +25,7 @@ pub(crate) enum RecordOption {
     Position,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Debug)]
 pub(crate) enum DatePrecision {
     #[serde(rename = "seconds")]
@@ -33,6 +36,7 @@ pub(crate) enum DatePrecision {
     Microseconds,
 }
 
+#[allow(dead_code, clippy::enum_variant_names)]
 #[derive(Serialize, Debug)]
 pub(crate) enum DateOutputFormat {
     #[serde(rename = "unix_timestamp_secs")]
@@ -89,6 +93,7 @@ impl Default for FieldMapping {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Debug)]
 pub(crate) enum MappingMode {
     #[serde(rename = "strict")]
@@ -132,6 +137,7 @@ pub(crate) struct IndexCreateRequest {
     pub(crate) version: String,
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub(crate) struct SearchResults {
     pub(crate) elapsed_time_micros: u64,

@@ -3,20 +3,16 @@ on: [pull_request]
 jobs:
   clippy:
     name: Report clippy lints
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     steps:
     - name: Checkout yaffle
       uses: actions/checkout@v3
+    - name: install clippy
+      uses: actions-rs/toolchain@v1
       with:
-        path: yaffle
-    - name: Checkout Toshi
-      uses: actions/checkout@v3
+        toolchain: stable
+        components: clippy
+    - name: Annotate commit with clippy warnings
+      uses: actions-rs/clippy-check@v1
       with:
-        repository: toshi-search/Toshi
-        path: Toshi
-    - name: Run clippy
-      uses: sigmaris/action-clippy@master
-      with:
-        workdir: yaffle
-        level: warning
-        clippy_flags: '--verbose'
+        token: ${{ secrets.GITHUB_TOKEN }}

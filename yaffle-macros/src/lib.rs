@@ -126,6 +126,7 @@ impl FieldValueConversion {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug)]
 enum TantivyType {
     String,
