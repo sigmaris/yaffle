@@ -4,7 +4,6 @@ mod schema;
 mod syslog;
 
 use crate::schema::YaffleSchema;
-use app::settings::{Settings, SharedSettings};
 use app::*;
 use async_trait::async_trait;
 use axum::{
@@ -61,6 +60,14 @@ pub enum YaffleError {
     #[error("JSON Serialization Error: {0}")]
     JsonSerialize(#[from] serde_json::Error),
 }
+
+#[derive(Debug)]
+struct Settings {
+    pub quickwit_url: String,
+    pub quickwit_index: String,
+}
+
+type SharedSettings = Arc<Mutex<Settings>>;
 
 lazy_static! {
     static ref TANTIVY_SCHEMA: Schema = schema::Document::tantivy_schema();

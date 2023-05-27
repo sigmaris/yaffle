@@ -1,5 +1,4 @@
 pub mod error_template;
-pub mod settings;
 
 use async_trait::async_trait;
 use cookie::Cookie;
@@ -278,7 +277,7 @@ pub async fn perform_search(
             cx
         );
         return Err(ServerFnError::ServerError(
-            "Missing SharedSettings".to_string(),
+            "Missing SharedServerAPI".to_string(),
         ));
     };
     let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
