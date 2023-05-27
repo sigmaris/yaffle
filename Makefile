@@ -1,28 +1,30 @@
 CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = x86_64-linux-gnu-gcc
 export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER
+LEPTOS_BIN_TARGET_TRIPLE = x86_64-unknown-linux-gnu
+export LEPTOS_BIN_TARGET_TRIPLE
+PKG_NAME = yaffle
 
-TOSHI_TYPES_SOURCES := $(shell find Toshi/toshi-types -type f -name '*.rs' -or -type f -name '*.toml')
-TOSHI_SERVER_SOURCES := $(shell find Toshi/toshi-server -type f -name '*.rs' -or -type f -name '*.toml') $(TOSHI_TYPES_SOURCES)
-TOSHI_CLIENT_SOURCES := $(shell find Toshi/toshi-client -type f -name '*.rs' -or -type f -name '*.toml') $(TOSHI_TYPES_SOURCES)
-TOSHI_PARENT_SOURCES = Toshi/Cargo.lock Toshi/Cargo.toml
-
-YAFFLE_SOURCES := $(shell find yaffle-server yaffle-macros -type f -name '*.rs' -or -type f -name '*.toml')
+YAFFLE_SOURCES := $(shell find yaffle-server yaffle-macros app frontend -type f -name '*.rs' -or -type f -name '*.toml')
 YAFFLE_PARENT_SOURCES := Cargo.lock Cargo.toml
+STATIC_FILES := target/site/pkg/$(PKG_NAME).css target/site/pkg/$(PKG_NAME).js target/site/pkg/$(PKG_NAME).wasm
+COMPRESSED_STATIC_FILES := $(addsuffix .br,$(STATIC_FILES)) $(addsuffix .gz,$(STATIC_FILES))
 
 .PHONY:all
 all: image/.built
 
-image/.built: Toshi/target/x86_64-unknown-linux-gnu/release/toshi target/x86_64-unknown-linux-gnu/release/yaffle-server image/*.*
+image/.built: target/server/$(LEPTOS_BIN_TARGET_TRIPLE)/release/yaffle-server $(STATIC_FILES) $(COMPRESSED_STATIC_FILES) image/*.*
 	packer build -var deb_arch=amd64 -var container_tag="$$(git describe --tags --dirty --always)" image
 	touch $@
 
-Toshi/target/x86_64-unknown-linux-gnu/release/toshi: $(TOSHI_SERVER_SOURCES) $(TOSHI_PARENT_SOURCES)
-	cd Toshi && cargo build --release --target x86_64-unknown-linux-gnu --bin toshi
+target/server/$(LEPTOS_BIN_TARGET_TRIPLE)/release/yaffle-server $(STATIC_FILES): $(YAFFLE_SOURCES) $(YAFFLE_PARENT_SOURCES)
+	cargo leptos build --release
 
-target/x86_64-unknown-linux-gnu/release/yaffle-server: $(YAFFLE_SOURCES) $(YAFFLE_PARENT_SOURCES) $(TOSHI_CLIENT_SOURCES) $(TOSHI_PARENT_SOURCES)
-	cargo build --release --target x86_64-unknown-linux-gnu --bin yaffle-server
+%.br: %
+	brotli -9 -o '$@' '$<'
+
+%.gz: %
+	gzip -9 -c '$<' > '$@'
 
 clean:
 	cargo clean
-	cd Toshi; cargo clean
 	rm image/.built

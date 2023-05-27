@@ -63,21 +63,14 @@ data "external-raw" "host_uname_machine" {
   program = ["uname", "-m"]
 }
 
-source "docker" "toshi" {
-  image  = "debian:bookworm-${var.debian_img_datestamp}"
-  commit = true
-  changes = [
-    "USER toshi",
-    "ENTRYPOINT cd /opt/toshi; exec /opt/toshi/toshi -c config/toshi_config.toml",
-    "EXPOSE 8080",
-  ]
-}
-
 source "docker" "yaffle" {
   image  = "debian:bookworm-${var.debian_img_datestamp}"
   commit = true
   changes = [
     "USER yaffle",
+    "ENV LEPTOS_OUTPUT_NAME yaffle",
+    "ENV LEPTOS_SITE_ROOT /opt/yaffle/site",
+    "ENV LEPTOS_SITE_ADDR 0.0.0.0:8088",
     "ENTRYPOINT cd /opt/yaffle; exec /opt/yaffle/yaffle-server",
     "EXPOSE 8088",
   ]
@@ -137,36 +130,6 @@ source "qemu" "bookworm" {
 }
 
 build {
-  name = "toshi-server"
-  sources = [
-    "source.docker.toshi"
-  ]
-  provisioner "shell" {
-    inline = [
-      "useradd --system --home-dir /opt/toshi --create-home --shell /sbin/nologin --user-group --comment 'Toshi Search' toshi",
-      "mkdir -p /opt/toshi/config",
-      "mkdir -p /opt/toshi/data",
-      "chown toshi:toshi /opt/toshi/data"
-    ]
-  }
-  provisioner "file" {
-    source      = "${path.root}/../Toshi/target/${local.rust_target}/release/toshi"
-    destination = "/opt/toshi/toshi"
-  }
-  provisioner "file" {
-    sources = [
-      "${path.root}/logging.toml",
-      "${path.root}/toshi_config.toml",
-    ]
-    destination = "/opt/toshi/config/"
-  }
-  post-processor "docker-tag" {
-    repository = "ghcr.io/sigmaris/toshi"
-    tags = ["latest", var.container_tag]
-  }
-}
-
-build {
   name = "yaffle-server"
   sources = [
     "source.docker.yaffle"
@@ -177,8 +140,12 @@ build {
     ]
   }
   provisioner "file" {
-    source      = "${path.root}/../target/${local.rust_target}/release/yaffle-server"
+    source      = "${path.root}/../target/server/${local.rust_target}/release/yaffle-server"
     destination = "/opt/yaffle/yaffle-server"
+  }
+  provisioner "file" {
+    source      = "${path.root}/../target/site"
+    destination = "/opt/yaffle"
   }
   post-processor "docker-tag" {
     repository = "ghcr.io/sigmaris/yaffle"

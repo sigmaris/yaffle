@@ -1,4 +1,3 @@
-use std::error::Error;
 use std::net::SocketAddr;
 
 use chrono::{
@@ -14,6 +13,7 @@ use nom::combinator::{map, map_res, opt, recognize, rest, value};
 use nom::sequence::{delimited, preceded, separated_pair, terminated, tuple};
 use nom::IResult;
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::Sender;
 
 #[derive(Debug)]
@@ -48,7 +48,7 @@ fn prio_and_facility(input: &[u8]) -> IResult<&[u8], (u8, String)> {
     map(
         map_res(
             map_res(delimited(char('<'), digit1, char('>')), std::str::from_utf8),
-            |digits| u8::from_str_radix(digits, 10),
+            |digits| digits.parse::<u8>(),
         ),
         |combined| {
             let facility = combined >> 3;
@@ -95,7 +95,7 @@ fn rfc3164_timestamp(input: &[u8]) -> IResult<&[u8], DateTime<FixedOffset>> {
             ),
             std::str::from_utf8,
         ),
-        |s| u8::from_str_radix(s, 10),
+        |digits| digits.parse::<u8>(),
     );
     let time = map_res(
         map_res(
@@ -158,7 +158,7 @@ fn identifier_and_pid(input: &[u8]) -> IResult<&[u8], (&[u8], Option<u64>)> {
                     preceded(tag("["), terminated(digit1, tag("]"))),
                     std::str::from_utf8,
                 ),
-                |s| u64::from_str_radix(s, 10),
+                |digits| digits.parse::<u64>(),
             )),
         )),
         tag(": "),
@@ -191,7 +191,7 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
             hostname: opt_hostname.map(|b| String::from_utf8_lossy(b).to_string()),
             identifier: opt_ident_and_pid
                 .map(|(ident, _)| String::from_utf8_lossy(ident).to_string()),
-            pid: opt_ident_and_pid.map(|(_, pid)| pid).flatten(),
+            pid: opt_ident_and_pid.and_then(|(_, pid)| pid),
             message: {
                 let string_msg = String::from_utf8_lossy(msg);
                 if opt_ts.is_none() && opt_hostname.is_none() && opt_ident_and_pid.is_none() {
@@ -211,7 +211,7 @@ fn parse_syslog(input: &[u8]) -> IResult<&[u8], SyslogMessage> {
 pub async fn run_recv_loop(
     socket: UdpSocket,
     syslog_pipe: Sender<(SocketAddr, SyslogMessage)>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), SendError<(SocketAddr, SyslogMessage)>> {
     let mut buf = [0; 65536];
     loop {
         match socket.recv_from(&mut buf).await {

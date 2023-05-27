@@ -1,4 +1,121 @@
 [workspace]
+members = ["app", "frontend", "yaffle-server"]
 
-members = ["yaffle-macros", "yaffle-server"]
-exclude = ["Toshi"]
+# need to be applied only to wasm build
+[profile.wasm-release]
+inherits = "release"
+opt-level = 'z'
+lto = true
+codegen-units = 1
+
+[workspace.dependencies]
+leptos = { version = "0.3", default-features = false, features = [
+    "serde",
+    "stable",
+] }
+leptos_meta = { version = "0.3", default-features = false, features = [
+    "stable",
+] }
+leptos_router = { version = "0.3", default-features = false, features = [
+    "stable",
+] }
+leptos_axum = { version = "0.3" }
+
+async-trait = "0.1"
+axum = "0.6.11"
+cfg-if = "1.0.0"
+bytes = "0.5"
+chrono = "0.4"
+clap = { version = "4", features = ["derive", "env"] }
+console_error_panic_hook = "0.1.7"
+console_log = "1.0.0"
+cookie = { version = "0.17", features = ["percent-encode"] }
+dns-lookup = "1.0"
+env_logger = "0.10"
+flate2 = "1.0"
+futures = "0.3"
+futures-batch = "0.6"
+http = "0.2.9"
+hyper = { version = "0.14", features = ["stream"] }
+lazy_static = "1.4"
+listenfd = "1"
+log = "0.4.17"
+nom = "7"
+serde = "1.0"
+serde_json = { version = "1.0", features = ["arbitrary_precision"] }
+tantivy = "0.19"
+thiserror = "1.0.40"
+tokio-stream = { version = "0.1", features = ["net"] }
+tokio = { version = "1.26.0", features = ["full"] }
+tower = { version = "0.4.13", features = ["full"] }
+tower-http = { version = "0.4.0", features = ["full"] }
+url = "2.3"
+wasm-bindgen = "0.2.84"
+web-sys = { version = "0.3", features = ["HtmlDocument"] }
+
+# See https://github.com/akesson/cargo-leptos for documentation of all the parameters.
+
+# A leptos project defines which workspace members
+# that are used together frontend (lib) & server (bin)
+[[workspace.metadata.leptos]]
+# this name is used for the wasm, js and css file names
+name = "yaffle"
+
+# the package in the workspace that contains the server binary (binary crate)
+bin-package = "yaffle-server"
+
+# the package in the workspace that contains the frontend wasm binary (library crate)
+lib-package = "frontend"
+
+# The site root folder is where cargo-leptos generate all output. WARNING: all content of this folder will be erased on a rebuild. Use it in your server setup.
+site-root = "target/site"
+
+# The site-root relative folder where all compiled output (JS, WASM and CSS) is written
+# Defaults to pkg
+site-pkg-dir = "pkg"
+
+# [Optional] The source CSS file. If it ends with .sass or .scss then it will be compiled by dart-sass into CSS. The CSS is optimized by Lightning CSS before being written to <site-root>/<site-pkg>/app.css
+style-file = "style/main.scss"
+
+# Assets source dir. All files found here will be copied and synchronized to site-root.
+# The assets-dir cannot have a sub directory with the same name/path as site-pkg-dir.
+#
+# Optional. Env: LEPTOS_ASSETS_DIR.
+assets-dir = "public"
+
+# The IP and port (ex: 127.0.0.1:3000) where the server serves the content. Use it in your server setup.
+site-addr = "127.0.0.1:3000"
+
+# The port to use for automatic reload monitoring
+reload-port = 3001
+
+#  The browserlist query used for optimizing the CSS.
+browserquery = "defaults"
+
+# Set by cargo-leptos watch when building with that tool. Controls whether autoreload JS will be included in the head
+watch = false
+
+# The environment Leptos will run in, usually either "DEV" or "PROD"
+env = "DEV"
+
+# The features to use when compiling the bin target
+#
+# Optional. Can be over-ridden with the command line parameter --bin-features
+bin-features = []
+
+# If the --no-default-features flag should be used when compiling the bin target
+#
+# Optional. Defaults to false.
+bin-default-features = false
+
+# The features to use when compiling the lib target
+#
+# Optional. Can be over-ridden with the command line parameter --lib-features
+lib-features = []
+
+# If the --no-default-features flag should be used when compiling the lib target
+#
+# Optional. Defaults to false.
+lib-default-features = false
+
+lib-profile-release = "wasm-release"

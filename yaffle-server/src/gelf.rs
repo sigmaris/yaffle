@@ -8,6 +8,7 @@ use flate2::bufread::{GzDecoder, ZlibDecoder};
 use log::{debug, info, trace, warn};
 use serde::{self, Deserialize};
 use tokio::net::UdpSocket;
+use tokio::sync::mpsc::error::SendError;
 use tokio::sync::mpsc::{channel, Sender};
 use tokio::task;
 use tokio::time::{self, Duration};
@@ -177,7 +178,7 @@ fn parse_packet(
 pub async fn run_recv_loop(
     socket: UdpSocket,
     gelf_pipe: Sender<(SocketAddr, GELFMessage)>,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<(), SendError<(SocketAddr, GELFMessage)>> {
     let mut buf = [0; 65536];
     let mut partials: HashMap<u64, Vec<Option<Bytes>>> = HashMap::new();
     let (expiry_tx, mut expiry_rx) = channel(10);
