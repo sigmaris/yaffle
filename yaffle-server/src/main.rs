@@ -23,7 +23,7 @@ use leptos::*;
 use leptos_axum::{generate_route_list, LeptosRoutes};
 use listenfd::ListenFd;
 use log::{debug, error, warn};
-use quickwit::SearchResults;
+use quickwit::{SearchError, SearchResults};
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -393,10 +393,18 @@ fn build_search_uri(settings: &SharedSettings, sp: &SearchOptions) -> Result<Uri
         .path_segments_mut()
         .unwrap()
         .extend(["api", "v1", &locked.quickwit_index, "search"]);
-    search_url
-        .query_pairs_mut()
-        .append_pair("query", if sp.query.is_empty() { "*" } else { &sp.query })
-        .append_pair("sort_by_field", "-source_timestamp");
+    {
+        let mut qp = search_url.query_pairs_mut();
+        qp.append_pair("query", if sp.query.is_empty() { "*" } else { &sp.query })
+            .append_pair("sort_by_field", "-source_timestamp")
+            .append_pair("max_hits", "1000");
+        if let Some(start) = sp.start_timestamp {
+            qp.append_pair("start_timestamp", &start.to_string());
+        }
+        if let Some(end) = sp.end_timestamp {
+            qp.append_pair("end_timestamp", &end.to_string());
+        }
+    }
     debug!("Search URI: {}", search_url.as_str());
     Ok(Uri::from_str(search_url.as_str())?)
 }
@@ -423,7 +431,17 @@ impl ServerAPI for ServerAPIImpl {
             .await
             .map_err(|e| e.to_string())
             .and_then(|body_bytes| {
-                serde_json::from_slice(&body_bytes).map_err(|e| e.to_string())
+                serde_json::from_slice(&body_bytes).map_err(|err| {
+                    if let Ok(SearchError { message }) = serde_json::from_slice(&body_bytes) {
+                        message
+                    } else {
+                        format!(
+                            "Error decoding {}: {}",
+                            String::from_utf8_lossy(&body_bytes),
+                            err.to_string()
+                        )
+                    }
+                })
             })?;
         let mut keys: HashSet<String> = HashSet::new();
         let hashmaps: Vec<HashMap<&str, Cow<'_, str>>> = sr

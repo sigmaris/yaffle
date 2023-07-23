@@ -156,10 +156,8 @@ fn SearchPage(cx: Scope) -> impl IntoView {
             <div class="row">
                 <Transition fallback=move || view! { cx, <p>"Loading..."</p> }>
                     <ErrorBoundary fallback=|cx, errors| view! { cx,
-                        <div class="row">
-                            <div class="col-md-12">
-                            "Errors:"
-                            </div>
+                        <div class="col-md-12">
+                        "Errors:"
                         </div>
                         {move || errors.get()
                             .into_iter()

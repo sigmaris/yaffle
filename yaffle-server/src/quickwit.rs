@@ -145,3 +145,8 @@ pub(crate) struct SearchResults {
     pub(crate) hits: Vec<Document>,
     pub(crate) num_hits: u64,
 }
+
+#[derive(Deserialize, Debug)]
+pub(crate) struct SearchError {
+    pub(crate) message: String,
+}
