@@ -8,7 +8,7 @@ use app::*;
 use async_trait::async_trait;
 use axum::{
     body::Body,
-    extract::{Extension, Path, RawQuery, State},
+    extract::{Path, RawQuery, State},
     http::{HeaderMap, Request},
     response::IntoResponse,
     routing::post,
@@ -297,8 +297,6 @@ async fn main() -> Result<(), YaffleError> {
         quickwit_index,
     }));
 
-    register_server_functions();
-
     // Setting get_configuration(None) means we'll be using cargo-leptos's env values
     // For deployment these variables are:
     // <https://github.com/leptos-rs/start-axum#executing-a-server-on-a-remote-machine-without-the-toolchain>
@@ -322,7 +320,7 @@ async fn main() -> Result<(), YaffleError> {
             post(handle_server_fns_wrapper).with_state(shared_server.clone()),
         )
         .leptos_routes(
-            leptos_options.clone(),
+            &leptos_options,
             routes,
             move |cx| view! { cx, <App server_api=shared_server.clone() /> },
         )
@@ -331,7 +329,7 @@ async fn main() -> Result<(), YaffleError> {
                 .precompressed_br()
                 .precompressed_gzip(),
         )
-        .layer(Extension(Arc::new(leptos_options)));
+        .with_state(leptos_options);
 
     let mut listenfd = ListenFd::from_env();
 

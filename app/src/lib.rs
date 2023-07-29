@@ -174,7 +174,7 @@ fn SearchPage(cx: Scope) -> impl IntoView {
                                     <form>
                                         <fieldset class="form-group">
                                             <legend>"Fields"</legend>
-                                            {search_res.read(cx).map(|search| { search.map(|(fields, _rows)| {fields.iter().filter_map(|field| {
+                                            {move || search_res.read(cx).map(|search| { search.map(|(fields, _rows)| {fields.iter().filter_map(|field| {
                                                 if field != "message" && field != "full_message" {
                                                     Some(view! { cx, <div class="form-check">
                                                         <input
@@ -210,7 +210,7 @@ fn SearchPage(cx: Scope) -> impl IntoView {
                             <table class="table table-sm">
                                 <thead class="thead-light sticky-top">
                                     <tr>
-                                        {search_res.read(cx).map(|result| result.map(|ok_res| ok_res.0.iter().filter_map(|field| {
+                                        {move || search_res.read(cx).map(|result| result.map(|ok_res| ok_res.0.iter().filter_map(|field| {
                                             if field == "message" || field == "full_message" {
                                                 None
                                             } else if cols_enabled.get().contains(field) {
@@ -222,7 +222,7 @@ fn SearchPage(cx: Scope) -> impl IntoView {
                                     </tr>
                                 </thead>
                                 <tbody>
-                                    {search_res.read(cx).map(|result| result.map(|ok_res| ok_res.1.iter().map(|row| {view! {cx,
+                                    {move || search_res.read(cx).map(|result| result.map(|ok_res| ok_res.1.iter().map(|row| {view! {cx,
                                         <tr>
                                             {ok_res.0.iter().enumerate().filter_map(|(index, field)| {
                                                 if field == "message" || field == "full_message" {
@@ -294,11 +294,6 @@ pub async fn perform_search(
         .search(&params)
         .await
         .map_err(ServerFnError::ServerError)
-}
-
-#[cfg(feature = "ssr")]
-pub fn register_server_functions() {
-    PerformSearch::register().unwrap();
 }
 
 #[derive(Clone, Debug)]

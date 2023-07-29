@@ -9,17 +9,10 @@ lto = true
 codegen-units = 1
 
 [workspace.dependencies]
-leptos = { version = "0.3", default-features = false, features = [
-    "serde",
-    "stable",
-] }
-leptos_meta = { version = "0.3", default-features = false, features = [
-    "stable",
-] }
-leptos_router = { version = "0.3", default-features = false, features = [
-    "stable",
-] }
-leptos_axum = { version = "0.3" }
+leptos = "0.4.6"
+leptos_meta = "0.4.6"
+leptos_router = "0.4.6"
+leptos_axum = "0.4.6"
 
 async-trait = "0.1"
 axum = "0.6.11"
