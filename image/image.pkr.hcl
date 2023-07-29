@@ -71,6 +71,7 @@ source "docker" "yaffle" {
     "ENV LEPTOS_OUTPUT_NAME yaffle",
     "ENV LEPTOS_SITE_ROOT /opt/yaffle/site",
     "ENV LEPTOS_SITE_ADDR 0.0.0.0:8088",
+    "ENV RUST_LOG info",
     "ENTRYPOINT cd /opt/yaffle; exec /opt/yaffle/yaffle-server",
     "EXPOSE 8088",
   ]
